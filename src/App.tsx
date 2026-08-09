@@ -15,6 +15,9 @@ function App() {
         color: '#e6edf3',
         minHeight: '100vh',
         padding: 16,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
       }}
     >
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>AI-DM Tactical RPG</h1>

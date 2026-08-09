@@ -4,8 +4,6 @@ import type { MapObject } from '../combat/environment';
 import type { EngineState, GridPosition } from '../combat/types';
 
 const TILE = 48;
-const ORIGIN_X = 160;
-const ORIGIN_Y = 60;
 
 const COLORS = {
   floor: 0x23233a,
@@ -53,12 +51,21 @@ export class CombatScene extends Phaser.Scene {
     this.drawIfChanged();
   }
 
+  /** Top-left pixel of the board, centered within the canvas for any map size. */
+  private boardOrigin(state: { width: number; height: number }): { x: number; y: number } {
+    return {
+      x: Math.floor((this.scale.width - state.width * TILE) / 2),
+      y: Math.floor((this.scale.height - state.height * TILE) / 2),
+    };
+  }
+
   private tileFromPointer(pointer: Phaser.Input.Pointer): GridPosition | null {
     const engine = this.engine;
     if (!engine) return null;
-    const x = Math.floor((pointer.worldX - ORIGIN_X) / TILE);
-    const y = Math.floor((pointer.worldY - ORIGIN_Y) / TILE);
     const state = engine.state;
+    const { x: OX, y: OY } = this.boardOrigin(state);
+    const x = Math.floor((pointer.worldX - OX) / TILE);
+    const y = Math.floor((pointer.worldY - OY) / TILE);
     if (x < 0 || y < 0 || x >= state.width || y >= state.height) return null;
     return { x, y };
   }
@@ -117,7 +124,9 @@ export class CombatScene extends Phaser.Scene {
     y: number,
     state: EngineState,
   ): boolean {
-    const object = state.objects.find((candidate) => candidate.position.x === x && candidate.position.y === y);
+    const object = state.objects.find(
+      (candidate) => candidate.position.x === x && candidate.position.y === y,
+    );
     if (object === undefined || !object.interactable) return false;
     const distance =
       Math.abs(unitPosition.x - object.position.x) + Math.abs(unitPosition.y - object.position.y);
@@ -139,7 +148,8 @@ export class CombatScene extends Phaser.Scene {
             .join(',')}:${JSON.stringify(s.turnResources[u.id])}`,
       ),
       ...s.objects.map(
-        (o) => `${o.id}:${o.kind}:${o.hp}:${o.open ? 'open' : 'closed'}:${o.position.x},${o.position.y}`,
+        (o) =>
+          `${o.id}:${o.kind}:${o.hp}:${o.open ? 'open' : 'closed'}:${o.position.x},${o.position.y}`,
       ),
       ...s.terrain.map((t) => `t${t.x},${t.y}`),
     ].join('|');
@@ -159,13 +169,14 @@ export class CombatScene extends Phaser.Scene {
     const engine = this.engine;
     if (!engine) return;
     const g = this.graphics;
+    const { x: OX, y: OY } = this.boardOrigin(state);
     g.clear();
 
     // Floor: difficult-terrain tiles get a distinct tint and diagonal stripes.
     for (let x = 0; x < state.width; x++) {
       for (let y = 0; y < state.height; y++) {
-        const px = ORIGIN_X + x * TILE;
-        const py = ORIGIN_Y + y * TILE;
+        const px = OX + x * TILE;
+        const py = OY + y * TILE;
         const difficult = state.terrain.some((tile) => tile.x === x && tile.y === y);
         g.fillStyle(difficult ? COLORS.difficult : COLORS.floor, 1);
         g.fillRect(px, py, TILE, TILE);
@@ -181,7 +192,7 @@ export class CombatScene extends Phaser.Scene {
 
     // Objects (drawn under units)
     for (const object of state.objects) {
-      this.drawObject(g, object);
+      this.drawObject(g, object, { x: OX, y: OY });
     }
 
     // Movement range or valid targets for the selected ability.
@@ -198,20 +209,15 @@ export class CombatScene extends Phaser.Scene {
         for (const target of engine.getValidAbilityTargets(selected.id, ability.id)) {
           if (target.kind === 'TILE') {
             g.fillStyle(ability.presentation.color, 0.32);
-            g.fillRect(
-              ORIGIN_X + target.x * TILE + 3,
-              ORIGIN_Y + target.y * TILE + 3,
-              TILE - 6,
-              TILE - 6,
-            );
+            g.fillRect(OX + target.x * TILE + 3, OY + target.y * TILE + 3, TILE - 6, TILE - 6);
             continue;
           }
           const targetUnit = state.units.find((unit) => unit.id === target.unitId);
           if (!targetUnit) continue;
           g.lineStyle(3, ability.presentation.color, 1);
           g.strokeRect(
-            ORIGIN_X + targetUnit.position.x * TILE + 3,
-            ORIGIN_Y + targetUnit.position.y * TILE + 3,
+            OX + targetUnit.position.x * TILE + 3,
+            OY + targetUnit.position.y * TILE + 3,
             TILE - 6,
             TILE - 6,
           );
@@ -219,20 +225,15 @@ export class CombatScene extends Phaser.Scene {
       } else {
         for (const position of engine.getMovementRange(selected.id)) {
           g.fillStyle(COLORS.range, 0.4);
-          g.fillRect(
-            ORIGIN_X + position.x * TILE + 3,
-            ORIGIN_Y + position.y * TILE + 3,
-            TILE - 6,
-            TILE - 6,
-          );
+          g.fillRect(OX + position.x * TILE + 3, OY + position.y * TILE + 3, TILE - 6, TILE - 6);
         }
       }
     }
 
     // Units
     for (const u of state.units) {
-      const cx = ORIGIN_X + u.position.x * TILE + TILE / 2;
-      const cy = ORIGIN_Y + u.position.y * TILE + TILE / 2;
+      const cx = OX + u.position.x * TILE + TILE / 2;
+      const cy = OY + u.position.y * TILE + TILE / 2;
       const downed = u.hp <= 0;
       const color = downed ? COLORS.downed : u.team === 'PLAYER' ? COLORS.player : COLORS.enemy;
       if (u.team === 'PLAYER') {
@@ -257,8 +258,8 @@ export class CombatScene extends Phaser.Scene {
     for (const t of this.hpTexts) t.destroy();
     this.hpTexts = [];
     for (const u of state.units) {
-      const cx = ORIGIN_X + u.position.x * TILE + TILE / 2;
-      const cy = ORIGIN_Y + u.position.y * TILE - 6;
+      const cx = OX + u.position.x * TILE + TILE / 2;
+      const cy = OY + u.position.y * TILE - 6;
       this.hpTexts.push(
         this.add
           .text(
@@ -285,8 +286,8 @@ export class CombatScene extends Phaser.Scene {
     this.objectHpTexts = [];
     for (const object of state.objects) {
       if (!object.destructible || object.hp >= object.maxHp) continue;
-      const cx = ORIGIN_X + object.position.x * TILE + TILE / 2;
-      const cy = ORIGIN_Y + object.position.y * TILE - 6;
+      const cx = OX + object.position.x * TILE + TILE / 2;
+      const cy = OY + object.position.y * TILE - 6;
       this.objectHpTexts.push(
         this.add
           .text(cx, cy, `${object.hp}/${object.maxHp}`, {
@@ -300,9 +301,13 @@ export class CombatScene extends Phaser.Scene {
     }
   }
 
-  private drawObject(g: Phaser.GameObjects.Graphics, object: MapObject): void {
-    const px = ORIGIN_X + object.position.x * TILE;
-    const py = ORIGIN_Y + object.position.y * TILE;
+  private drawObject(
+    g: Phaser.GameObjects.Graphics,
+    object: MapObject,
+    origin: { x: number; y: number },
+  ): void {
+    const px = origin.x + object.position.x * TILE;
+    const py = origin.y + object.position.y * TILE;
     const cx = px + TILE / 2;
     const cy = py + TILE / 2;
 
