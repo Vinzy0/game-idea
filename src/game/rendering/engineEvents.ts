@@ -1,7 +1,14 @@
 import type { TacticalEngine } from '../combat/engine';
 
 type EngineMethod =
-  'selectUnit' | 'selectAbility' | 'moveUnit' | 'attack' | 'useAbility' | 'endTurn' | 'reset';
+  | 'selectUnit'
+  | 'selectAbility'
+  | 'moveUnit'
+  | 'attack'
+  | 'useAbility'
+  | 'interact'
+  | 'endTurn'
+  | 'reset';
 
 const MUTATING_METHODS: EngineMethod[] = [
   'selectUnit',
@@ -9,6 +16,7 @@ const MUTATING_METHODS: EngineMethod[] = [
   'moveUnit',
   'attack',
   'useAbility',
+  'interact',
   'endTurn',
   'reset',
 ];

@@ -98,6 +98,24 @@ Ability data (catalog or encounter config)
 - Area targeting resolves recipients before effects execute, so one effect primitive works for both single-target and area abilities.
 - Phaser highlights engine-provided valid targets and never calculates range, allegiance, damage, healing, pushing, statuses, or costs.
 
+## Phase 4 Environment Flow
+
+```text
+Map object configs + terrain tiles (encounter config, e.g. demoScenario)
+  → createObject() kind defaults + validateEnvironment() fail-fast validation
+  → engine state (objects[] with hp/open, terrain[])
+  → isBlocked() derives from blocking objects (closed doors block, open doors pass)
+  → cost-aware movement/pathfinding (difficult terrain costs 2; Dijkstra)
+  → interact() (doors toggle, 1 Action) / TILE-ability destructible damage / hazard tick at turn start
+  → Phaser scene (terrain tint, per-kind object sprites, object HP labels) + React HUD (Interact button)
+```
+
+- `MapObject`/`MapObjectConfig` and the pure helpers (`createObject`, `movementCostAt`, `objectBlocksMovement`, `validateEnvironment`) live in `src/game/combat/environment.ts`; the engine is their only consumer.
+- The engine constructor fails fast: any environment validation error (out-of-bounds object or terrain tile, duplicate object position, destructible with no HP, terrain overlapping an object) throws with the full error list.
+- Movement BFS became cost-aware Dijkstra: entering a difficult-terrain tile costs 2 movement, and `moveUnit` consumes the true path cost. `firstStepToward` (used by the AI brain) shares the same semantics.
+- `interact()` is a public engine command like `moveUnit`/`useAbility`: adjacency + Action validation inside the engine, so doors are testable without the scene or HUD.
+- Destructible objects (desk, locker, barrel) take damage only from TILE-targeting abilities (e.g. Fireball); UNIT-targeting abilities like Punch never touch them. Hazards tick for 1 damage at each team's turn start.
+
 ## Current Layout
 
 ```text
@@ -106,14 +124,20 @@ src/
   App.tsx           Tactical prototype shell
   app/
     GameCanvas.tsx  Owns the Phaser.Game lifecycle (mount → create, unmount → destroy)
-    TacticalHud.tsx React command surface for resources and abilities
+    TacticalHud.tsx React command surface for resources, abilities, and Interact
   game/
+    ai/
+      enemyBrain.ts Pure single-action enemy decision (Phase 3)
     abilities/
       types.ts       Ability, targeting, area, cost, effect, status schemas
       catalog.ts     Punch, Fireball, and Force Push data
     combat/
+      environment.ts Map object kinds, terrain costs, validation (pure, Phase 4)
       engine.ts      Pure TypeScript rules, commands, and generic effect resolution
+      demoScenario.ts Phase 4 school-hallway encounter config
+      types.ts       Engine state and config schemas
     rendering/
       CombatScene.ts Phaser-only presentation and pointer translation
+      engineEvents.ts React subscription wrapper over mutating engine commands
 docs/               PRD + PHASES copies, architecture, rules, AI contracts, status
 ```

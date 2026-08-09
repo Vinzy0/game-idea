@@ -19,8 +19,9 @@ function App() {
     >
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>AI-DM Tactical RPG</h1>
       <p style={{ fontSize: 13, color: '#8b949e', marginTop: 0 }}>
-        Phase 2 — Lego Ability System. Select your blue hero, move on green tiles, then choose
-        Punch, Fireball, or Force Push and click a highlighted target.
+        Phase 4 — Tactical Environment. Select your blue hero, move on green tiles (dark striped =
+        difficult terrain), pick Punch, Fireball, or Force Push and click a highlighted target,
+        click the door to interact, and watch the enemy AI come at you.
       </p>
       <TacticalHud engine={engine} />
       <GameCanvas engine={engine} />

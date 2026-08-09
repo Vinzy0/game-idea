@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { PUNCH_ID } from '../../abilities/catalog';
+import { FIREBALL_ID, PUNCH_ID } from '../../abilities/catalog';
 import { TacticalEngine, aliveUnits } from '../engine';
+import type { MapObjectConfig } from '../environment';
 import type { GridPosition, Team, Unit } from '../types';
 
 function makeUnit(id: string, team: Team, x: number, y: number, hp = 3, movement = 3): Unit {
@@ -18,13 +19,18 @@ function makeUnit(id: string, team: Team, x: number, y: number, hp = 3, movement
   };
 }
 
+function wallAt(x: number, y: number): MapObjectConfig {
+  return { id: `wall-${x}-${y}`, kind: 'WALL', x, y };
+}
+
 function makeEngine(
   units: Unit[],
-  blocked: GridPosition[] = [],
+  objects: MapObjectConfig[] = [],
+  terrain: GridPosition[] = [],
   width = 10,
   height = 10,
 ): TacticalEngine {
-  return new TacticalEngine({ width, height, blocked, units });
+  return new TacticalEngine({ width, height, objects, terrain, units });
 }
 
 describe('TacticalEngine', () => {
@@ -53,6 +59,23 @@ describe('TacticalEngine', () => {
       expect(engine.state.units[0].hp).toBe(3);
       expect(engine.state.log).toEqual([]);
     });
+
+    it('deep-clones objects and terrain in the state getter', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0, 3, 3)],
+        [{ id: 'door', kind: 'DOOR', x: 1, y: 0 }],
+        [{ x: 2, y: 2 }],
+      );
+      const snapshot = engine.state;
+      snapshot.objects[0].hp = 99;
+      snapshot.objects[0].open = true;
+      snapshot.objects[0].position.x = 9;
+      snapshot.terrain[0].x = 9;
+      expect(engine.state.objects[0].hp).toBe(0);
+      expect(engine.state.objects[0].open).toBe(false);
+      expect(engine.state.objects[0].position).toEqual({ x: 1, y: 0 });
+      expect(engine.state.terrain[0]).toEqual({ x: 2, y: 2 });
+    });
   });
 
   describe('getMovementRange', () => {
@@ -71,7 +94,7 @@ describe('TacticalEngine', () => {
     it('excludes blocked tiles', () => {
       const engine = makeEngine(
         [makeUnit('p1', 'PLAYER', 0, 0, 3, 3), makeUnit('e1', 'ENEMY', 4, 4, 2, 2)],
-        [{ x: 1, y: 0 }],
+        [wallAt(1, 0)],
       );
       const range = engine.getMovementRange('p1');
       expect(range.some((p) => p.x === 1 && p.y === 0)).toBe(false);
@@ -124,6 +147,29 @@ describe('TacticalEngine', () => {
     });
   });
 
+  describe('difficult terrain', () => {
+    it('charges 2 movement per difficult tile and finds cheaper detours', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0, 3, 3)],
+        [],
+        [
+          { x: 1, y: 0 },
+          { x: 2, y: 0 },
+        ],
+      );
+      const range = engine.getMovementRange('p1');
+      // one difficult tile away: cost 2, within movement 3
+      expect(range.some((p) => p.x === 1 && p.y === 0)).toBe(true);
+      // two difficult tiles in a row: cost 4 > 3, unreachable
+      expect(range.some((p) => p.x === 2 && p.y === 0)).toBe(false);
+      // a longer route around the difficult pair reaches (2,1) at cost 3
+      expect(range.some((p) => p.x === 2 && p.y === 1)).toBe(true);
+      // movement consumes the true terrain cost
+      expect(engine.moveUnit('p1', 1, 0)).toBe(true);
+      expect(engine.state.turnResources.p1.movementRemaining).toBe(1);
+    });
+  });
+
   describe('canMove / moveUnit', () => {
     it('applies a legal move and logs it', () => {
       const engine = makeEngine([
@@ -139,7 +185,7 @@ describe('TacticalEngine', () => {
     it('rejects moves onto blocked tiles', () => {
       const engine = makeEngine(
         [makeUnit('p1', 'PLAYER', 0, 0, 3, 3), makeUnit('e1', 'ENEMY', 4, 4, 2, 2)],
-        [{ x: 1, y: 0 }],
+        [wallAt(1, 0)],
       );
       expect(engine.moveUnit('p1', 1, 0)).toBe(false);
       expect(engine.state.units.find((u) => u.id === 'p1')!.position).toEqual({ x: 0, y: 0 });
@@ -171,6 +217,137 @@ describe('TacticalEngine', () => {
       expect(engine.state.phase).toBe('PLAYER_TURN');
       expect(engine.moveUnit('p1', 0, 1)).toBe(false);
       expect(engine.moveUnit('nope', 0, 1)).toBe(false);
+    });
+  });
+
+  describe('interact', () => {
+    it('closed doors block movement and interact() opens them', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0, 3, 3)],
+        [{ id: 'door', kind: 'DOOR', x: 1, y: 0 }],
+      );
+      expect(engine.canMove('p1', 1, 0)).toBe(false);
+      expect(engine.canMove('p1', 2, 0)).toBe(false); // through the closed door
+      expect(engine.interact('p1', 'door')).toBe(true);
+      expect(engine.state.log).toContain('P1 opens the door');
+      expect(engine.state.objects.find((o) => o.id === 'door')!.open).toBe(true);
+      expect(engine.canMove('p1', 1, 0)).toBe(true);
+      expect(engine.moveUnit('p1', 1, 0)).toBe(true);
+    });
+
+    it('requires adjacency, costs an Action, and toggles the door closed again', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0, 3, 3)],
+        [{ id: 'door', kind: 'DOOR', x: 2, y: 0 }],
+      );
+      expect(engine.interact('p1', 'door')).toBe(false); // two tiles away
+      expect(engine.interact('nope', 'door')).toBe(false); // unknown unit
+      expect(engine.interact('p1', 'nope')).toBe(false); // unknown object
+      expect(engine.moveUnit('p1', 1, 0)).toBe(true); // now adjacent
+      expect(engine.interact('p1', 'door')).toBe(true);
+      expect(engine.state.turnResources.p1.actionRemaining).toBe(0);
+      expect(engine.interact('p1', 'door')).toBe(false); // no Action left
+      expect(engine.state.objects.find((o) => o.id === 'door')!.open).toBe(true);
+      engine.endTurn(); // no enemies: refreshes p1 resources
+      expect(engine.state.phase).toBe('PLAYER_TURN');
+      expect(engine.interact('p1', 'door')).toBe(true); // toggles back closed
+      expect(engine.state.objects.find((o) => o.id === 'door')!.open).toBe(false);
+      expect(engine.state.log).toContain('P1 closes the door');
+    });
+  });
+
+  describe('destructible objects', () => {
+    it('Fireball destroys a barrel and its tile becomes passable', () => {
+      const engine = makeEngine(
+        [
+          { ...makeUnit('p1', 'PLAYER', 0, 0, 3, 3), abilityIds: [FIREBALL_ID] },
+          makeUnit('e1', 'ENEMY', 6, 6, 3, 2),
+        ],
+        [{ id: 'barrel-1', kind: 'BARREL', x: 2, y: 0 }],
+      );
+      expect(engine.isBlocked(2, 0)).toBe(true);
+      expect(engine.useAbility('p1', FIREBALL_ID, { kind: 'TILE', x: 1, y: 0 })).toBe(true);
+      expect(engine.state.objects.find((o) => o.id === 'barrel-1')).toBeUndefined();
+      expect(engine.state.log).toContain('P1 destroys the barrel');
+      expect(engine.isBlocked(2, 0)).toBe(false);
+      expect(engine.canMove('p1', 2, 0)).toBe(true);
+    });
+
+    it('UNIT-targeting abilities like Punch never damage objects', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0, 3, 3), makeUnit('e1', 'ENEMY', 1, 0, 3, 2)],
+        [{ id: 'barrel-1', kind: 'BARREL', x: 2, y: 0 }],
+      );
+      expect(engine.attack('p1', 'e1')).toBe(true);
+      const barrel = engine.state.objects.find((o) => o.id === 'barrel-1')!;
+      expect(barrel.hp).toBe(2);
+      expect(engine.state.log.some((l) => l.includes('destroys the barrel'))).toBe(false);
+    });
+
+    it('TILE abilities can target a destructible object tile directly', () => {
+      const engine = makeEngine(
+        [
+          { ...makeUnit('p1', 'PLAYER', 0, 0, 3, 3), abilityIds: [FIREBALL_ID] },
+          makeUnit('e1', 'ENEMY', 6, 6, 3, 2),
+        ],
+        [{ id: 'barrel-1', kind: 'BARREL', x: 2, y: 0 }],
+      );
+      // The barrel's own tile is a legal Fireball target even though it blocks movement.
+      expect(engine.useAbility('p1', FIREBALL_ID, { kind: 'TILE', x: 2, y: 0 })).toBe(true);
+      expect(engine.state.objects.find((o) => o.id === 'barrel-1')).toBeUndefined();
+      expect(engine.state.log).toContain('P1 destroys the barrel');
+      expect(engine.isBlocked(2, 0)).toBe(false);
+    });
+
+    it('TILE abilities cannot target indestructible blockers (walls, closed doors)', () => {
+      const engine = makeEngine(
+        [
+          { ...makeUnit('p1', 'PLAYER', 0, 0, 3, 3), abilityIds: [FIREBALL_ID] },
+          makeUnit('e1', 'ENEMY', 6, 6, 3, 2),
+        ],
+        [
+          { id: 'wall-1', kind: 'WALL', x: 1, y: 0 },
+          { id: 'door', kind: 'DOOR', x: 3, y: 0 },
+        ],
+      );
+      expect(engine.useAbility('p1', FIREBALL_ID, { kind: 'TILE', x: 1, y: 0 })).toBe(false);
+      expect(engine.useAbility('p1', FIREBALL_ID, { kind: 'TILE', x: 3, y: 0 })).toBe(false);
+      // A free tile next to them stays targetable.
+      expect(engine.useAbility('p1', FIREBALL_ID, { kind: 'TILE', x: 2, y: 0 })).toBe(true);
+    });
+  });
+
+  describe('hazards', () => {
+    it('deals 1 damage to a unit standing on it at that team turn start', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0, 3, 3), makeUnit('e1', 'ENEMY', 5, 5, 3, 2)],
+        [{ id: 'hazard-1', kind: 'HAZARD', x: 0, y: 0 }],
+      );
+      engine.endTurn(); // the enemy turn runs first; the hazard ticks on the player turn start
+      expect(engine.state.units.find((u) => u.id === 'p1')!.hp).toBe(2);
+      expect(engine.state.log).toContain('P1 takes 1 damage from the hazard');
+    });
+
+    it('damages an enemy standing on it at the enemy turn start', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0, 5, 3), makeUnit('e1', 'ENEMY', 1, 0, 3, 2)],
+        [{ id: 'hazard-1', kind: 'HAZARD', x: 1, y: 0 }],
+      );
+      engine.endTurn();
+      expect(engine.state.units.find((u) => u.id === 'e1')!.hp).toBe(2);
+      expect(engine.state.log).toContain('E1 takes 1 damage from the hazard');
+    });
+
+    it('lets a hazard down the last player and ends the game in DEFEAT', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0, 1, 3)],
+        [{ id: 'hazard-1', kind: 'HAZARD', x: 0, y: 0 }],
+      );
+      engine.endTurn();
+      expect(engine.state.units.find((u) => u.id === 'p1')!.hp).toBe(0);
+      expect(engine.state.phase).toBe('DEFEAT');
+      expect(engine.state.winner).toBe('ENEMY');
+      expect(engine.state.log).toContain('P1 takes 1 damage from the hazard');
     });
   });
 
@@ -306,13 +483,15 @@ describe('TacticalEngine', () => {
       expect(engine.state.log.filter((l) => l === 'E1 attacks P1 for 1 damage')).toHaveLength(2);
     });
 
-    it('attacks the adjacent player unit with the lowest hp', () => {
+    it('attacks the lower-hp player when two players are equidistant', () => {
       const engine = makeEngine([
+        makeUnit('p2', 'PLAYER', 2, 0, 1, 3), // lower HP, listed first
         makeUnit('p1', 'PLAYER', 0, 0, 3, 3),
-        makeUnit('p2', 'PLAYER', 1, 1, 1, 3),
         makeUnit('e1', 'ENEMY', 1, 0, 2, 2),
       ]);
       engine.endTurn();
+      // Both players are 1 tile away; the enemy hits the lower-HP one (p2),
+      // which is also the first valid target in unit order.
       expect(engine.state.units.find((u) => u.id === 'p2')!.hp).toBe(0);
       expect(engine.state.units.find((u) => u.id === 'p1')!.hp).toBe(3);
       expect(engine.state.log).toContain('E1 attacks P2 for 1 damage');
@@ -346,7 +525,7 @@ describe('TacticalEngine', () => {
     it('detours around blocked tiles instead of walking through them', () => {
       const engine = makeEngine(
         [makeUnit('p1', 'PLAYER', 2, 0, 3, 3), makeUnit('e1', 'ENEMY', 0, 0, 2, 2)],
-        [{ x: 1, y: 0 }],
+        [wallAt(1, 0)],
       );
       engine.endTurn();
       expect(engine.state.units.find((u) => u.id === 'e1')!.position).toEqual({ x: 1, y: 1 });
@@ -367,14 +546,94 @@ describe('TacticalEngine', () => {
     it('does nothing when no path to the player exists', () => {
       const engine = makeEngine(
         [makeUnit('p1', 'PLAYER', 2, 2, 3, 3), makeUnit('e1', 'ENEMY', 0, 0, 2, 2)],
-        [
-          { x: 0, y: 1 },
-          { x: 1, y: 0 },
-        ],
+        [wallAt(0, 1), wallAt(1, 0)],
       );
       engine.endTurn();
       expect(engine.state.units.find((u) => u.id === 'e1')!.position).toEqual({ x: 0, y: 0 });
       expect(engine.state.phase).toBe('PLAYER_TURN');
+    });
+
+    it('has Firebrand attack from range with Fireball instead of closing in', () => {
+      // A wall separates the two, so closing in is impossible; Fireball has no
+      // line-of-sight check yet (Phase 4 boundary) and still connects.
+      const wall = Array.from({ length: 10 }, (_, y) => ({
+        id: `wall-6-${y}`,
+        kind: 'WALL' as const,
+        x: 6,
+        y,
+      }));
+      const engine = makeEngine(
+        [
+          makeUnit('hero', 'PLAYER', 3, 6, 3, 3),
+          {
+            ...makeUnit('e3', 'ENEMY', 8, 6, 3, 2),
+            name: 'Firebrand',
+            abilityIds: [FIREBALL_ID, PUNCH_ID],
+          },
+        ],
+        wall,
+      );
+      engine.endTurn();
+      // Fireball is in range 5, so the brain blasts instead of approaching.
+      expect(engine.state.units.find((u) => u.id === 'hero')!.hp).toBe(1); // 3 - 2
+      expect(engine.state.units.find((u) => u.id === 'e3')!.position).toEqual({ x: 8, y: 6 });
+      expect(engine.state.log).toContain('Firebrand blasts HERO for 2 damage');
+      expect(engine.state.log.some((l) => l.includes('Firebrand moved to'))).toBe(false);
+    });
+
+    it('prefers Fireball over Punch when both are in range (higher damage)', () => {
+      const engine = makeEngine([
+        makeUnit('p1', 'PLAYER', 1, 0, 3, 3),
+        {
+          ...makeUnit('e1', 'ENEMY', 0, 0, 3, 3),
+          abilityIds: [PUNCH_ID, FIREBALL_ID],
+        },
+      ]);
+      engine.endTurn();
+      // Row-major tile targeting makes (0,0) Fireball's first valid target; the
+      // player at (1,0) sits inside its radius, so the 2-damage Fireball wins.
+      expect(engine.state.units.find((u) => u.id === 'p1')!.hp).toBe(1); // 3 - 2
+      expect(engine.state.log).toContain('E1 blasts P1 for 2 damage');
+      expect(engine.state.log).not.toContain('E1 attacks P1');
+    });
+
+    it('moves toward the nearest player when no ability is in range', () => {
+      const engine = makeEngine([
+        makeUnit('p1', 'PLAYER', 5, 9, 3, 3),
+        makeUnit('e1', 'ENEMY', 5, 5, 3, 2),
+      ]);
+      engine.endTurn();
+      // Punch (range 1) cannot reach, so the brain takes steps along the path.
+      expect(engine.state.units.find((u) => u.id === 'e1')!.position).toEqual({ x: 5, y: 7 });
+      expect(engine.state.log).toContain('E1 moved to (5,6)');
+      expect(engine.state.log).toContain('E1 moved to (5,7)');
+      expect(engine.state.units.find((u) => u.id === 'p1')!.hp).toBe(3); // never reached melee
+    });
+
+    it('navigates difficult terrain to reach and attack the player', () => {
+      // The only path to the hero crosses the difficult tile at (1,1): walls
+      // close (1,0) and (1,2). The cost-aware brain steps onto it and pushes on.
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 3, 0, 3, 3), makeUnit('e1', 'ENEMY', 0, 0, 3, 2)],
+        [wallAt(1, 0), wallAt(1, 2)],
+        [{ x: 1, y: 1 }],
+      );
+      engine.endTurn(); // (0,1)
+      engine.endTurn(); // (1,1) — the difficult tile, costing the full 2 movement
+      expect(engine.state.units.find((u) => u.id === 'e1')!.position).toEqual({ x: 1, y: 1 });
+      engine.endTurn(); // (2,1) -> (3,1), then attacks the adjacent hero
+      expect(engine.state.units.find((u) => u.id === 'e1')!.position).toEqual({ x: 3, y: 1 });
+      expect(engine.state.units.find((u) => u.id === 'p1')!.hp).toBe(2);
+      expect(engine.state.log).toContain('E1 attacks P1 for 1 damage');
+    });
+
+    it('performs no actions when no players are alive', () => {
+      const engine = makeEngine([makeUnit('e1', 'ENEMY', 0, 0, 3, 2)]);
+      engine.endTurn();
+      expect(engine.state.phase).toBe('PLAYER_TURN');
+      expect(engine.state.units.find((u) => u.id === 'e1')!.position).toEqual({ x: 0, y: 0 });
+      expect(engine.state.log.some((l) => l.includes('moved to'))).toBe(false);
+      expect(engine.state.log.some((l) => l.includes('attacks'))).toBe(false);
     });
   });
 
@@ -415,13 +674,36 @@ describe('TacticalEngine', () => {
     it('unitAt and isBlocked report board contents', () => {
       const engine = makeEngine(
         [makeUnit('p1', 'PLAYER', 0, 0, 3, 3), makeUnit('e1', 'ENEMY', 4, 4, 2, 2)],
-        [{ x: 3, y: 3 }],
+        [wallAt(3, 3)],
       );
       expect(engine.unitAt(0, 0)?.id).toBe('p1');
       expect(engine.unitAt(0, 0)?.name).toBe('P1');
       expect(engine.unitAt(5, 5)).toBeNull();
       expect(engine.isBlocked(3, 3)).toBe(true);
       expect(engine.isBlocked(2, 2)).toBe(false);
+    });
+  });
+
+  describe('environment validation', () => {
+    it('throws at construction when an object is out of bounds', () => {
+      expect(
+        () =>
+          new TacticalEngine({
+            units: [makeUnit('p1', 'PLAYER', 0, 0, 3, 3)],
+            objects: [{ id: 'wall-1', kind: 'WALL', x: 10, y: 0 }],
+          }),
+      ).toThrow(/Invalid environment:.*out of bounds/);
+    });
+
+    it('throws at construction when terrain overlaps an object', () => {
+      expect(
+        () =>
+          new TacticalEngine({
+            units: [makeUnit('p1', 'PLAYER', 0, 0, 3, 3)],
+            objects: [{ id: 'barrel-1', kind: 'BARREL', x: 2, y: 2 }],
+            terrain: [{ x: 2, y: 2 }],
+          }),
+      ).toThrow(/Invalid environment:.*overlaps/);
     });
   });
 
@@ -444,6 +726,28 @@ describe('TacticalEngine', () => {
       expect(state.units.find((u) => u.id === 'p1')!.hp).toBe(3);
       expect(state.units.find((u) => u.id === 'e1')!.position).toEqual({ x: 4, y: 4 });
       expect(state.units.find((u) => u.id === 'e1')!.hp).toBe(2);
+    });
+
+    it('restores doors and destructible objects to their initial state', () => {
+      const engine = makeEngine(
+        [
+          { ...makeUnit('p1', 'PLAYER', 0, 0, 3, 3), abilityIds: [FIREBALL_ID] },
+          makeUnit('e1', 'ENEMY', 8, 8, 3, 2), // keeps the game running
+        ],
+        [
+          { id: 'door', kind: 'DOOR', x: 1, y: 0 },
+          { id: 'barrel-1', kind: 'BARREL', x: 3, y: 0 },
+        ],
+      );
+      engine.useAbility('p1', FIREBALL_ID, { kind: 'TILE', x: 2, y: 0 }); // destroys the barrel
+      expect(engine.state.objects.find((o) => o.id === 'barrel-1')).toBeUndefined();
+      engine.endTurn(); // no enemies: refreshes p1's Action
+      expect(engine.interact('p1', 'door')).toBe(true); // opens the door
+      expect(engine.state.objects.find((o) => o.id === 'door')!.open).toBe(true);
+      engine.reset();
+      expect(engine.state.objects.find((o) => o.id === 'door')!.open).toBe(false);
+      expect(engine.state.objects.find((o) => o.id === 'barrel-1')!.hp).toBe(2);
+      expect(engine.state.objects).toHaveLength(2);
     });
   });
 

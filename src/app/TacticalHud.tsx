@@ -15,6 +15,19 @@ export default function TacticalHud({ engine }: { engine: TacticalEngine }) {
   const resources = selected === null ? null : state.turnResources[selected.id];
   const abilities = selected === null ? [] : engine.getAbilitiesForUnit(selected.id);
 
+  // Interactable objects adjacent to the selected living player unit, in state order.
+  const adjacentInteractables =
+    selected === null || selected.hp <= 0 || selected.team !== 'PLAYER'
+      ? []
+      : state.objects.filter((object) => {
+          if (!object.interactable) return false;
+          const distance =
+            Math.abs(selected.position.x - object.position.x) +
+            Math.abs(selected.position.y - object.position.y);
+          return distance === 1;
+        });
+  const interactTarget = adjacentInteractables[0] ?? null;
+
   const banner =
     state.phase === 'VICTORY'
       ? 'Victory!'
@@ -46,6 +59,20 @@ export default function TacticalHud({ engine }: { engine: TacticalEngine }) {
             {resources.bonusActionRemaining}
           </span>
         )}
+        <button
+          onClick={() => interactTarget !== null && engine.interact(selected!.id, interactTarget.id)}
+          disabled={interactTarget === null}
+          title={
+            adjacentInteractables.length > 0
+              ? `Interact with ${adjacentInteractables
+                  .map((object) => object.kind.toLowerCase())
+                  .join(', ')}`
+              : 'No interactable object adjacent to the selected unit'
+          }
+          style={{ padding: '4px 12px' }}
+        >
+          Interact
+        </button>
         <button
           onClick={() => engine.endTurn()}
           disabled={state.phase !== 'PLAYER_TURN'}

@@ -1,3 +1,4 @@
+import { planEnemyAction } from '../ai/enemyBrain';
 import { CORE_ABILITIES, PUNCH_ID } from '../abilities/catalog';
 import type {
   Ability,
@@ -6,6 +7,13 @@ import type {
   TargetTeam,
   TurnResources,
 } from '../abilities/types';
+import {
+  createObject,
+  movementCostAt,
+  objectBlocksMovement,
+  validateEnvironment,
+} from './environment';
+import type { MapObject } from './environment';
 import type { EngineState, GameConfig, GridPosition, Team, Unit } from './types';
 
 const NEIGHBORS: ReadonlyArray<readonly [number, number]> = [
@@ -14,6 +22,9 @@ const NEIGHBORS: ReadonlyArray<readonly [number, number]> = [
   [0, 1],
   [0, -1],
 ];
+
+/** Safety cap on brain-driven actions per enemy per turn (guards against AI bugs). */
+const MAX_ENEMY_ACTIONS = 32;
 
 export function aliveUnits(units: Unit[], team: Team): Unit[] {
   return units.filter((unit) => unit.team === team && unit.hp > 0);
@@ -33,7 +44,8 @@ export class TacticalEngine {
   private readonly initial: {
     width: number;
     height: number;
-    blocked: GridPosition[];
+    objects: MapObject[];
+    terrain: GridPosition[];
     units: Unit[];
   };
   private readonly abilitiesById = new Map<string, Ability>();
@@ -62,10 +74,20 @@ export class TacticalEngine {
       }
     }
 
+    const width = Math.max(1, config.width ?? 10);
+    const height = Math.max(1, config.height ?? 10);
+    const objects = (config.objects ?? []).map((objectConfig) => createObject(objectConfig));
+    const terrain = (config.terrain ?? []).map((position) => ({ ...position }));
+    const environmentErrors = validateEnvironment(objects, terrain, width, height);
+    if (environmentErrors.length > 0) {
+      throw new Error(`Invalid environment: ${environmentErrors.join('; ')}`);
+    }
+
     this.initial = {
-      width: Math.max(1, config.width ?? 10),
-      height: Math.max(1, config.height ?? 10),
-      blocked: (config.blocked ?? []).map((position) => ({ ...position })),
+      width,
+      height,
+      objects,
+      terrain,
       units,
     };
     this.current = this.buildInitialState();
@@ -79,7 +101,11 @@ export class TacticalEngine {
 
     return {
       ...this.current,
-      blocked: this.current.blocked.map((position) => ({ ...position })),
+      objects: this.current.objects.map((object) => ({
+        ...object,
+        position: { ...object.position },
+      })),
+      terrain: this.current.terrain.map((position) => ({ ...position })),
       units: this.current.units.map((unit) => ({
         ...unit,
         position: { ...unit.position },
@@ -104,8 +130,21 @@ export class TacticalEngine {
     });
   }
 
+  /** Living player units — the enemy brain's view of valid targets. */
+  alivePlayers(): Unit[] {
+    return aliveUnits(this.current.units, 'PLAYER');
+  }
+
+  /** First step of the shortest legal path from `from` to `to`, or null. */
+  firstStepToward(from: GridPosition, to: GridPosition): GridPosition | null {
+    return this.firstStepOnPath(from, to);
+  }
+
   isBlocked(x: number, y: number): boolean {
-    return this.current.blocked.some((position) => position.x === x && position.y === y);
+    return this.current.objects.some(
+      (object) =>
+        object.position.x === x && object.position.y === y && objectBlocksMovement(object),
+    );
   }
 
   unitAt(x: number, y: number): Unit | null {
@@ -206,13 +245,45 @@ export class TacticalEngine {
     const ability = this.getAbility(abilityId)!;
     const recipients = this.resolveRecipients(caster, ability, target);
     const targetPosition = this.targetPosition(target)!;
+    const objectRecipients = this.resolveObjectRecipients(ability, targetPosition);
 
     this.consumeActionCost(caster.id, ability);
     for (const effect of ability.effects) {
       this.applyEffect(caster, ability, effect, recipients, targetPosition);
+      // Destructible objects take damage only from TILE-targeting abilities.
+      if (effect.kind === 'DAMAGE') {
+        for (const object of objectRecipients) {
+          this.damageObject(caster, object, effect.amount);
+        }
+      }
     }
     this.checkGameOver();
     this.current.selectedAbilityId = null;
+    return true;
+  }
+
+  /**
+   * Interact with an adjacent interactable object (currently doors). Costs one
+   * Action; other interactable kinds consume the cost without extra effect.
+   */
+  interact(unitId: string, objectId: string): boolean {
+    const unit = this.findUnit(unitId);
+    const object = this.current.objects.find((candidate) => candidate.id === objectId);
+    if (unit === null || object === undefined) return false;
+    if (unit.hp <= 0 || this.activeTeam() !== unit.team) return false;
+    if (this.current.phase !== 'PLAYER_TURN') return false;
+    if (!object.interactable) return false;
+    if (manhattanDistance(unit.position, object.position) !== 1) return false;
+    const resources = this.current.turnResources[unit.id];
+    if (resources === undefined || resources.actionRemaining <= 0) return false;
+
+    resources.actionRemaining -= 1;
+    if (object.kind === 'DOOR') {
+      object.open = !object.open;
+      this.current.log.push(
+        object.open ? `${unit.name} opens the door` : `${unit.name} closes the door`,
+      );
+    }
     return true;
   }
 
@@ -290,7 +361,7 @@ export class TacticalEngine {
       if (!matchesTeamFilter(caster, targetUnit, ability.targeting.team)) return false;
     } else {
       if (target.kind !== 'TILE') return false;
-      if (!this.isInBounds(target.x, target.y) || this.isBlocked(target.x, target.y)) return false;
+      if (!this.isTileTargetable(target.x, target.y)) return false;
     }
 
     if (manhattanDistance(caster.position, position) > ability.targeting.range) return false;
@@ -338,6 +409,33 @@ export class TacticalEngine {
         manhattanDistance(unit.position, center) <= area.radius &&
         matchesTeamFilter(caster, unit, area.affects),
     );
+  }
+
+  /** Destructible objects hit by a TILE-targeting ability, per its area shape. */
+  private resolveObjectRecipients(ability: Ability, center: GridPosition): MapObject[] {
+    if (ability.targeting.kind !== 'TILE') return [];
+    const destructible = this.current.objects.filter((object) => object.destructible);
+    const area = ability.area;
+    if (area.shape === 'SINGLE') {
+      return destructible.filter(
+        (object) => object.position.x === center.x && object.position.y === center.y,
+      );
+    }
+    return destructible.filter(
+      (object) => manhattanDistance(object.position, center) <= area.radius,
+    );
+  }
+
+  private damageObject(caster: Unit, object: MapObject, amount: number): void {
+    const damage = Math.max(0, Math.floor(amount));
+    object.hp = Math.max(0, object.hp - damage);
+    this.current.log.push(
+      `${caster.name} damages the ${object.kind.toLowerCase()} for ${damage} damage`,
+    );
+    if (object.hp <= 0) {
+      this.current.log.push(`${caster.name} destroys the ${object.kind.toLowerCase()}`);
+      this.current.objects = this.current.objects.filter((candidate) => candidate.id !== object.id);
+    }
   }
 
   private applyEffect(
@@ -447,7 +545,11 @@ export class TacticalEngine {
     return {
       width: this.initial.width,
       height: this.initial.height,
-      blocked: this.initial.blocked.map((position) => ({ ...position })),
+      objects: this.initial.objects.map((object) => ({
+        ...object,
+        position: { ...object.position },
+      })),
+      terrain: this.initial.terrain.map((position) => ({ ...position })),
       units,
       phase: 'PLAYER_TURN',
       selectedUnitId: null,
@@ -466,6 +568,25 @@ export class TacticalEngine {
     for (const unit of aliveUnits(this.current.units, team)) {
       this.current.turnResources[unit.id] = this.freshResources(unit);
     }
+    // Hazard damage can end the battle (e.g. the last player downed by a hazard).
+    if (this.tickHazards(team)) this.checkGameOver();
+  }
+
+  private tickHazards(team: Team): boolean {
+    let damaged = false;
+    for (const unit of aliveUnits(this.current.units, team)) {
+      const hazard = this.current.objects.some(
+        (object) =>
+          object.kind === 'HAZARD' &&
+          object.position.x === unit.position.x &&
+          object.position.y === unit.position.y,
+      );
+      if (!hazard) continue;
+      unit.hp = Math.max(0, unit.hp - 1);
+      this.current.log.push(`${unit.name} takes 1 damage from the hazard`);
+      damaged = true;
+    }
+    return damaged;
   }
 
   private tickStatuses(team: Team): void {
@@ -485,33 +606,67 @@ export class TacticalEngine {
     const movementRemaining = this.current.turnResources[unit.id]?.movementRemaining ?? 0;
     if (movementRemaining <= 0) return [];
 
-    const reachable: Array<{ position: GridPosition; distance: number }> = [];
-    const visited = new Set<string>([`${unit.position.x},${unit.position.y}`]);
-    const queue: Array<{ x: number; y: number; distance: number }> = [
-      { x: unit.position.x, y: unit.position.y, distance: 0 },
+    // Cost-aware Dijkstra: entering a difficult-terrain tile costs 2 movement,
+    // so a tile may be reachable at a lower cost via a longer path.
+    const startKey = `${unit.position.x},${unit.position.y}`;
+    const best = new Map<string, number>([[startKey, 0]]);
+    const queue: Array<{ x: number; y: number; cost: number }> = [
+      { x: unit.position.x, y: unit.position.y, cost: 0 },
     ];
 
     while (queue.length > 0) {
-      const current = queue.shift()!;
+      const current = this.popCheapest(queue);
+      if (best.get(`${current.x},${current.y}`) !== current.cost) continue; // stale entry
       for (const [dx, dy] of NEIGHBORS) {
         const next = { x: current.x + dx, y: current.y + dy };
-        const key = `${next.x},${next.y}`;
-        if (visited.has(key)) continue;
         if (!this.isInBounds(next.x, next.y) || this.isBlocked(next.x, next.y)) continue;
         if (this.isOccupiedByAliveUnit(next.x, next.y)) continue;
-        visited.add(key);
-        const distance = current.distance + 1;
-        if (distance <= movementRemaining) {
-          reachable.push({ position: next, distance });
-          queue.push({ ...next, distance });
-        }
+        const cost = current.cost + movementCostAt(next.x, next.y, this.current.terrain);
+        if (cost > movementRemaining) continue;
+        const key = `${next.x},${next.y}`;
+        const known = best.get(key);
+        if (known !== undefined && known <= cost) continue;
+        best.set(key, cost);
+        queue.push({ ...next, cost });
       }
+    }
+
+    const reachable: Array<{ position: GridPosition; distance: number }> = [];
+    for (const [key, cost] of best) {
+      if (cost <= 0) continue;
+      const [x, y] = key.split(',').map(Number);
+      reachable.push({ position: { x, y }, distance: cost });
     }
     return reachable;
   }
 
+  /** Removes and returns the lowest-cost entry (ties: first inserted). */
+  private popCheapest<T extends { cost: number }>(queue: T[]): T {
+    let bestIndex = 0;
+    for (let index = 1; index < queue.length; index += 1) {
+      if (queue[index].cost < queue[bestIndex].cost) bestIndex = index;
+    }
+    return queue.splice(bestIndex, 1)[0];
+  }
+
   private findUnit(unitId: string): Unit | null {
     return this.current.units.find((unit) => unit.id === unitId) ?? null;
+  }
+
+  /**
+   * A tile is a legal TILE target when it is in bounds and not sealed by an
+   * indestructible blocker. Destructible objects (e.g. barrels) are valid
+   * targets so area abilities can destroy them; walls and closed doors are not.
+   */
+  private isTileTargetable(x: number, y: number): boolean {
+    if (!this.isInBounds(x, y)) return false;
+    return !this.current.objects.some(
+      (object) =>
+        object.position.x === x &&
+        object.position.y === y &&
+        objectBlocksMovement(object) &&
+        !object.destructible,
+    );
   }
 
   private isInBounds(x: number, y: number): boolean {
@@ -546,77 +701,62 @@ export class TacticalEngine {
     }
   }
 
+  /**
+   * Brain-driven enemy turns: repeatedly ask the shared enemy brain for the next
+   * action and execute it until the brain is done, the phase changes (victory,
+   * defeat), or the per-enemy safety cap is hit.
+   */
   private runEnemyAI(): void {
     const enemies = aliveUnits(this.current.units, 'ENEMY');
     for (const enemy of enemies) {
       if (this.current.phase !== 'ENEMY_TURN') break;
-      let attacked = this.tryAdjacentAttack(enemy);
-      while (
-        !attacked &&
-        this.current.phase === 'ENEMY_TURN' &&
-        this.current.turnResources[enemy.id].movementRemaining > 0
-      ) {
-        const step = this.nextStepTowardNearestPlayer(enemy);
-        if (step === null || !this.moveUnit(enemy.id, step.x, step.y)) break;
-        attacked = this.tryAdjacentAttack(enemy);
+      let actions = 0;
+      while (actions < MAX_ENEMY_ACTIONS && this.current.phase === 'ENEMY_TURN') {
+        const action = planEnemyAction(enemy, this);
+        if (action === null) break;
+        const executed =
+          action.type === 'MOVE'
+            ? this.moveUnit(enemy.id, action.x, action.y)
+            : this.useAbility(enemy.id, action.abilityId, action.target);
+        if (!executed) break;
+        actions += 1;
       }
     }
-  }
-
-  private tryAdjacentAttack(enemy: Unit): boolean {
-    const targets = aliveUnits(this.current.units, 'PLAYER').filter((unit) =>
-      this.canUseAbility(enemy.id, PUNCH_ID, { kind: 'UNIT', unitId: unit.id }),
-    );
-    if (targets.length === 0) return false;
-
-    let best = targets[0];
-    for (const target of targets) {
-      if (target.hp < best.hp) best = target;
-    }
-    return this.useAbility(enemy.id, PUNCH_ID, { kind: 'UNIT', unitId: best.id });
-  }
-
-  private nextStepTowardNearestPlayer(enemy: Unit): GridPosition | null {
-    const players = aliveUnits(this.current.units, 'PLAYER');
-    if (players.length === 0) return null;
-    let nearest: Unit | null = null;
-    let nearestDistance = Number.POSITIVE_INFINITY;
-    for (const player of players) {
-      const distance = manhattanDistance(player.position, enemy.position);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearest = player;
-      }
-    }
-    if (nearest === null) return null;
-    return this.firstStepOnPath(enemy.position, nearest.position);
   }
 
   private firstStepOnPath(from: GridPosition, to: GridPosition): GridPosition | null {
     const startKey = `${from.x},${from.y}`;
     const goalKey = `${to.x},${to.y}`;
     if (startKey === goalKey) return null;
-    const visited = new Set<string>([startKey]);
+
+    // Cost-aware Dijkstra with parent reconstruction: the returned step is the
+    // first tile of the cheapest path (difficult terrain costs 2).
+    const best = new Map<string, number>([[startKey, 0]]);
     const parent = new Map<string, string>();
-    const queue: GridPosition[] = [{ ...from }];
+    const queue: Array<{ key: string; x: number; y: number; cost: number }> = [
+      { key: startKey, x: from.x, y: from.y, cost: 0 },
+    ];
 
     while (queue.length > 0) {
-      const current = queue.shift()!;
+      const current = this.popCheapest(queue);
+      if (best.get(current.key) !== current.cost) continue; // stale entry
+      if (current.key === goalKey) {
+        let childKey = goalKey;
+        while (parent.get(childKey) !== startKey) childKey = parent.get(childKey)!;
+        const [x, y] = childKey.split(',').map(Number);
+        return { x, y };
+      }
       for (const [dx, dy] of NEIGHBORS) {
         const next = { x: current.x + dx, y: current.y + dy };
         const key = `${next.x},${next.y}`;
-        if (visited.has(key)) continue;
         if (!this.isInBounds(next.x, next.y) || this.isBlocked(next.x, next.y)) continue;
         if (key !== goalKey && this.isOccupiedByAliveUnit(next.x, next.y)) continue;
-        visited.add(key);
-        parent.set(key, `${current.x},${current.y}`);
-        if (key === goalKey) {
-          let childKey = key;
-          while (parent.get(childKey) !== startKey) childKey = parent.get(childKey)!;
-          const [x, y] = childKey.split(',').map(Number);
-          return { x, y };
-        }
-        queue.push(next);
+        const cost = current.cost + movementCostAt(next.x, next.y, this.current.terrain);
+        const known = best.get(key);
+        if (known !== undefined && known <= cost) continue;
+        best.set(key, cost);
+        parent.set(key, current.key);
+        queue.push({ key, x: next.x, y: next.y, cost });
       }
     }
     return null;

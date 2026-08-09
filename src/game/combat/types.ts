@@ -1,4 +1,5 @@
 import type { Ability, ActiveStatus, TurnResources } from '../abilities/types';
+import type { MapObject, MapObjectConfig } from './environment';
 
 export type Team = 'PLAYER' | 'ENEMY';
 export type Controller = 'PLAYER' | 'AI';
@@ -30,7 +31,8 @@ export type UnitConfig = Omit<Unit, 'abilityIds' | 'statuses'> & {
 export interface EngineState {
   width: number;
   height: number;
-  blocked: GridPosition[];
+  objects: MapObject[];
+  terrain: GridPosition[];
   units: Unit[]; // all units, including downed (hp 0) ones
   phase: TurnPhase;
   selectedUnitId: string | null;
@@ -43,7 +45,8 @@ export interface EngineState {
 export interface GameConfig {
   width?: number;
   height?: number;
-  blocked?: GridPosition[];
+  objects?: MapObjectConfig[];
+  terrain?: GridPosition[];
   units: UnitConfig[];
   /** Additional data-defined abilities available to this encounter. */
   abilities?: readonly Ability[];

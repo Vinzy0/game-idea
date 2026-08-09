@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import type { TacticalEngine } from '../combat/engine';
+import type { MapObject } from '../combat/environment';
 import type { EngineState, GridPosition } from '../combat/types';
 
 const TILE = 48;
@@ -9,13 +10,20 @@ const ORIGIN_Y = 60;
 const COLORS = {
   floor: 0x23233a,
   floorLine: 0x2e2e4a,
-  blocked: 0x12121f,
+  difficult: 0x1d1d33,
   range: 0x2f9e63,
   player: 0x4e9af1,
   enemy: 0xd45555,
   downed: 0x555566,
   selection: 0xffffff,
   hpBack: 0x000000,
+  wall: 0x3d3d5c,
+  desk: 0x8a6d3b,
+  locker: 0x4a6fa5,
+  door: 0x9c6b2f,
+  doorOpen: 0x2e2e4a,
+  barrel: 0x7a4a21,
+  hazard: 0xff7b00,
 };
 
 /**
@@ -26,6 +34,7 @@ export class CombatScene extends Phaser.Scene {
   private engine: TacticalEngine | null = null;
   private graphics!: Phaser.GameObjects.Graphics;
   private hpTexts: Phaser.GameObjects.Text[] = [];
+  private objectHpTexts: Phaser.GameObjects.Text[] = [];
   private signature = '';
 
   constructor() {
@@ -83,11 +92,37 @@ export class CombatScene extends Phaser.Scene {
         engine.selectUnit(unit.id);
       } else if (selected && engine.canMove(selected.id, tile.x, tile.y)) {
         engine.moveUnit(selected.id, tile.x, tile.y);
+      } else if (
+        selected &&
+        selected.hp > 0 &&
+        selected.team === 'PLAYER' &&
+        this.tryInteract(selected.id, selected.position, tile.x, tile.y, state)
+      ) {
+        // interact() succeeded — nothing else to do.
       } else {
         engine.selectUnit(''); // deselect (unknown id => null)
       }
     }
     this.drawIfChanged();
+  }
+
+  /**
+   * Click routing helper: if the clicked tile holds an interactable object and
+   * the selected (living player) unit stands adjacent to it, interact.
+   */
+  private tryInteract(
+    unitId: string,
+    unitPosition: GridPosition,
+    x: number,
+    y: number,
+    state: EngineState,
+  ): boolean {
+    const object = state.objects.find((candidate) => candidate.position.x === x && candidate.position.y === y);
+    if (object === undefined || !object.interactable) return false;
+    const distance =
+      Math.abs(unitPosition.x - object.position.x) + Math.abs(unitPosition.y - object.position.y);
+    if (distance !== 1) return false;
+    return this.engine?.interact(unitId, object.id) ?? false;
   }
 
   private stateSignature(s: EngineState): string {
@@ -103,6 +138,10 @@ export class CombatScene extends Phaser.Scene {
             .map((status) => `${status.id}-${status.remainingTurns}`)
             .join(',')}:${JSON.stringify(s.turnResources[u.id])}`,
       ),
+      ...s.objects.map(
+        (o) => `${o.id}:${o.kind}:${o.hp}:${o.open ? 'open' : 'closed'}:${o.position.x},${o.position.y}`,
+      ),
+      ...s.terrain.map((t) => `t${t.x},${t.y}`),
     ].join('|');
   }
 
@@ -122,19 +161,27 @@ export class CombatScene extends Phaser.Scene {
     const g = this.graphics;
     g.clear();
 
-    // Floor + blocked tiles
+    // Floor: difficult-terrain tiles get a distinct tint and diagonal stripes.
     for (let x = 0; x < state.width; x++) {
       for (let y = 0; y < state.height; y++) {
         const px = ORIGIN_X + x * TILE;
         const py = ORIGIN_Y + y * TILE;
-        const blocked = state.blocked.some((b) => b.x === x && b.y === y);
-        g.fillStyle(blocked ? COLORS.blocked : COLORS.floor, 1);
+        const difficult = state.terrain.some((tile) => tile.x === x && tile.y === y);
+        g.fillStyle(difficult ? COLORS.difficult : COLORS.floor, 1);
         g.fillRect(px, py, TILE, TILE);
-        if (!blocked) {
-          g.lineStyle(1, COLORS.floorLine, 0.6);
-          g.strokeRect(px, py, TILE, TILE);
+        g.lineStyle(1, COLORS.floorLine, 0.6);
+        g.strokeRect(px, py, TILE, TILE);
+        if (difficult) {
+          g.lineStyle(2, COLORS.floorLine, 0.8);
+          g.lineBetween(px + 6, py + 6, px + TILE - 6, py + TILE - 6);
+          g.lineBetween(px + 6, py + TILE - 6, px + TILE - 6, py + 6);
         }
       }
+    }
+
+    // Objects (drawn under units)
+    for (const object of state.objects) {
+      this.drawObject(g, object);
     }
 
     // Movement range or valid targets for the selected ability.
@@ -231,6 +278,65 @@ export class CombatScene extends Phaser.Scene {
           )
           .setOrigin(0.5),
       );
+    }
+
+    // Object HP labels (destructible objects only, while damaged)
+    for (const t of this.objectHpTexts) t.destroy();
+    this.objectHpTexts = [];
+    for (const object of state.objects) {
+      if (!object.destructible || object.hp >= object.maxHp) continue;
+      const cx = ORIGIN_X + object.position.x * TILE + TILE / 2;
+      const cy = ORIGIN_Y + object.position.y * TILE - 6;
+      this.objectHpTexts.push(
+        this.add
+          .text(cx, cy, `${object.hp}/${object.maxHp}`, {
+            color: '#ffd7a1',
+            fontSize: '12px',
+            fontFamily: 'monospace',
+            backgroundColor: '#00000088',
+          })
+          .setOrigin(0.5),
+      );
+    }
+  }
+
+  private drawObject(g: Phaser.GameObjects.Graphics, object: MapObject): void {
+    const px = ORIGIN_X + object.position.x * TILE;
+    const py = ORIGIN_Y + object.position.y * TILE;
+    const cx = px + TILE / 2;
+    const cy = py + TILE / 2;
+
+    switch (object.kind) {
+      case 'WALL':
+        g.fillStyle(COLORS.wall, 1);
+        g.fillRect(px + 2, py + 2, TILE - 4, TILE - 4);
+        break;
+      case 'DESK':
+        g.fillStyle(COLORS.desk, 1);
+        g.fillRect(px + 8, py + 8, TILE - 16, TILE - 16);
+        break;
+      case 'LOCKER':
+        g.fillStyle(COLORS.locker, 1);
+        g.fillRect(px + 5, py + 5, TILE - 10, TILE - 10);
+        break;
+      case 'DOOR':
+        if (object.open) {
+          g.lineStyle(2, COLORS.doorOpen, 1);
+        } else {
+          g.lineStyle(8, COLORS.door, 1);
+        }
+        g.lineBetween(px + 4, py + 4, px + TILE - 4, py + TILE - 4);
+        break;
+      case 'BARREL':
+        g.fillStyle(COLORS.barrel, 1);
+        g.fillCircle(cx, cy, TILE * 0.3);
+        break;
+      case 'HAZARD':
+        g.fillStyle(COLORS.hazard, 0.35);
+        g.fillRect(px + 3, py + 3, TILE - 6, TILE - 6);
+        g.lineStyle(2, COLORS.hazard, 0.5);
+        g.strokeRect(px + 10, py + 10, TILE - 20, TILE - 20);
+        break;
     }
   }
 }

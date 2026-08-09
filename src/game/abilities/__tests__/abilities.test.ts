@@ -80,7 +80,7 @@ describe('data-driven ability system', () => {
 
   it('stops push movement at blocked tiles and occupied tiles', () => {
     const engine = new TacticalEngine({
-      blocked: [{ x: 4, y: 0 }],
+      objects: [{ id: 'wall-4-0', kind: 'WALL', x: 4, y: 0 }],
       units: [
         makeUnit('hero', 'PLAYER', 0, 0, { abilityIds: [FORCE_PUSH_ID] }),
         makeUnit('enemy', 'ENEMY', 2, 0),
@@ -228,7 +228,7 @@ describe('data-driven ability system', () => {
 
   it('does not spend resources when a target is invalid', () => {
     const engine = new TacticalEngine({
-      blocked: [{ x: 2, y: 0 }],
+      objects: [{ id: 'wall-2-0', kind: 'WALL', x: 2, y: 0 }],
       units: [
         makeUnit('hero', 'PLAYER', 0, 0, { abilityIds: [FIREBALL_ID] }),
         makeUnit('enemy', 'ENEMY', 4, 0),
