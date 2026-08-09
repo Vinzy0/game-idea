@@ -1,22 +1,50 @@
+import type { Ability, ActiveStatus, TurnResources } from '../abilities/types';
+
 export type Team = 'PLAYER' | 'ENEMY';
 export type Controller = 'PLAYER' | 'AI';
 export type TurnPhase = 'PLAYER_TURN' | 'ENEMY_TURN' | 'VICTORY' | 'DEFEAT';
-export interface GridPosition { x: number; y: number }
-export interface Unit {
-  id: string; name: string; team: Team; controller: Controller;
-  hp: number; maxHp: number; movement: number; position: GridPosition;
+
+export interface GridPosition {
+  x: number;
+  y: number;
 }
+
+export interface Unit {
+  id: string;
+  name: string;
+  team: Team;
+  controller: Controller;
+  hp: number;
+  maxHp: number;
+  movement: number;
+  position: GridPosition;
+  abilityIds: string[];
+  statuses: ActiveStatus[];
+}
+
+export type UnitConfig = Omit<Unit, 'abilityIds' | 'statuses'> & {
+  abilityIds?: string[];
+  statuses?: ActiveStatus[];
+};
+
 export interface EngineState {
-  width: number; height: number;
+  width: number;
+  height: number;
   blocked: GridPosition[];
-  units: Unit[];            // all units, including downed (hp 0) ones
+  units: Unit[]; // all units, including downed (hp 0) ones
   phase: TurnPhase;
   selectedUnitId: string | null;
+  selectedAbilityId: string | null;
   winner: Team | null;
-  log: string[];            // human-readable event log: moves, attacks, downs, victory/defeat
+  turnResources: Record<string, TurnResources>;
+  log: string[];
 }
+
 export interface GameConfig {
-  width?: number; height?: number;   // default 10
+  width?: number;
+  height?: number;
   blocked?: GridPosition[];
-  units: Unit[];
+  units: UnitConfig[];
+  /** Additional data-defined abilities available to this encounter. */
+  abilities?: readonly Ability[];
 }

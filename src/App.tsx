@@ -19,8 +19,8 @@ function App() {
     >
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>AI-DM Tactical RPG</h1>
       <p style={{ fontSize: 13, color: '#8b949e', marginTop: 0 }}>
-        Phase 1 — Ugly Chess Prototype. Click your blue unit, step into green tiles, click a red
-        enemy to attack, then End Turn.
+        Phase 2 — Lego Ability System. Select your blue hero, move on green tiles, then choose
+        Punch, Fireball, or Force Push and click a highlighted target.
       </p>
       <TacticalHud engine={engine} />
       <GameCanvas engine={engine} />

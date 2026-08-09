@@ -15,7 +15,6 @@ const COLORS = {
   enemy: 0xd45555,
   downed: 0x555566,
   selection: 0xffffff,
-  attackable: 0xff7777,
   hpBack: 0x000000,
 };
 
@@ -64,17 +63,28 @@ export class CombatScene extends Phaser.Scene {
     const unit = engine.unitAt(tile.x, tile.y);
 
     if (state.phase === 'PLAYER_TURN') {
-      if (unit && unit.team === 'PLAYER' && unit.hp > 0) {
-        engine.selectUnit(unit.id);
-      } else if (state.selectedUnitId) {
-        const selected = state.units.find((u) => u.id === state.selectedUnitId);
-        if (selected && unit && engine.canAttack(selected.id, unit.id)) {
-          engine.attack(selected.id, unit.id);
-        } else if (selected && engine.canMove(selected.id, tile.x, tile.y)) {
-          engine.moveUnit(selected.id, tile.x, tile.y);
-        } else {
-          engine.selectUnit(''); // deselect (unknown id => null)
+      const selected = state.units.find((candidate) => candidate.id === state.selectedUnitId);
+      const ability =
+        state.selectedAbilityId === null ? null : engine.getAbility(state.selectedAbilityId);
+
+      if (selected && ability) {
+        const target =
+          ability.targeting.kind === 'TILE'
+            ? ({ kind: 'TILE', x: tile.x, y: tile.y } as const)
+            : unit
+              ? ({ kind: 'UNIT', unitId: unit.id } as const)
+              : null;
+        if (target && engine.useAbility(selected.id, ability.id, target)) {
+          this.drawIfChanged();
+          return;
         }
+        if (unit && unit.team === 'PLAYER' && unit.hp > 0) engine.selectUnit(unit.id);
+      } else if (unit && unit.team === 'PLAYER' && unit.hp > 0) {
+        engine.selectUnit(unit.id);
+      } else if (selected && engine.canMove(selected.id, tile.x, tile.y)) {
+        engine.moveUnit(selected.id, tile.x, tile.y);
+      } else {
+        engine.selectUnit(''); // deselect (unknown id => null)
       }
     }
     this.drawIfChanged();
@@ -85,8 +95,14 @@ export class CombatScene extends Phaser.Scene {
       s.phase,
       s.winner ?? '-',
       s.selectedUnitId ?? '-',
+      s.selectedAbilityId ?? '-',
       s.log.length,
-      ...s.units.map((u) => `${u.id}:${u.hp}:${u.position.x},${u.position.y}`),
+      ...s.units.map(
+        (u) =>
+          `${u.id}:${u.hp}:${u.position.x},${u.position.y}:${u.statuses
+            .map((status) => `${status.id}-${status.remainingTurns}`)
+            .join(',')}:${JSON.stringify(s.turnResources[u.id])}`,
+      ),
     ].join('|');
   }
 
@@ -121,19 +137,44 @@ export class CombatScene extends Phaser.Scene {
       }
     }
 
-    // Movement range + attackable targets for the selected unit
+    // Movement range or valid targets for the selected ability.
     const selected = state.units.find((u) => u.id === state.selectedUnitId);
-    if (selected && selected.hp > 0 && state.phase === 'PLAYER_TURN' && selected.team === 'PLAYER') {
-      for (const p of engine.getMovementRange(selected.id)) {
-        g.fillStyle(COLORS.range, 0.4);
-        g.fillRect(ORIGIN_X + p.x * TILE + 3, ORIGIN_Y + p.y * TILE + 3, TILE - 6, TILE - 6);
-      }
-      for (const u of state.units) {
-        if (u.team === 'ENEMY' && u.hp > 0 && engine.canAttack(selected.id, u.id)) {
-          g.lineStyle(3, COLORS.attackable, 1);
+    if (
+      selected &&
+      selected.hp > 0 &&
+      state.phase === 'PLAYER_TURN' &&
+      selected.team === 'PLAYER'
+    ) {
+      const ability =
+        state.selectedAbilityId === null ? null : engine.getAbility(state.selectedAbilityId);
+      if (ability) {
+        for (const target of engine.getValidAbilityTargets(selected.id, ability.id)) {
+          if (target.kind === 'TILE') {
+            g.fillStyle(ability.presentation.color, 0.32);
+            g.fillRect(
+              ORIGIN_X + target.x * TILE + 3,
+              ORIGIN_Y + target.y * TILE + 3,
+              TILE - 6,
+              TILE - 6,
+            );
+            continue;
+          }
+          const targetUnit = state.units.find((unit) => unit.id === target.unitId);
+          if (!targetUnit) continue;
+          g.lineStyle(3, ability.presentation.color, 1);
           g.strokeRect(
-            ORIGIN_X + u.position.x * TILE + 3,
-            ORIGIN_Y + u.position.y * TILE + 3,
+            ORIGIN_X + targetUnit.position.x * TILE + 3,
+            ORIGIN_Y + targetUnit.position.y * TILE + 3,
+            TILE - 6,
+            TILE - 6,
+          );
+        }
+      } else {
+        for (const position of engine.getMovementRange(selected.id)) {
+          g.fillStyle(COLORS.range, 0.4);
+          g.fillRect(
+            ORIGIN_X + position.x * TILE + 3,
+            ORIGIN_Y + position.y * TILE + 3,
             TILE - 6,
             TILE - 6,
           );
@@ -173,12 +214,21 @@ export class CombatScene extends Phaser.Scene {
       const cy = ORIGIN_Y + u.position.y * TILE - 6;
       this.hpTexts.push(
         this.add
-          .text(cx, cy, `${u.hp}/${u.maxHp}`, {
-            color: '#ffffff',
-            fontSize: '13px',
-            fontFamily: 'monospace',
-            backgroundColor: '#00000088',
-          })
+          .text(
+            cx,
+            cy,
+            `${u.hp}/${u.maxHp}${
+              u.statuses.length > 0
+                ? ` [${u.statuses.map((status) => status.name).join(', ')}]`
+                : ''
+            }`,
+            {
+              color: '#ffffff',
+              fontSize: '13px',
+              fontFamily: 'monospace',
+              backgroundColor: '#00000088',
+            },
+          )
           .setOrigin(0.5),
       );
     }

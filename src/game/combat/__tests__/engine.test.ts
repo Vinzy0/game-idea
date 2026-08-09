@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { PUNCH_ID } from '../../abilities/catalog';
 import { TacticalEngine, aliveUnits } from '../engine';
 import type { GridPosition, Team, Unit } from '../types';
 
@@ -12,6 +13,8 @@ function makeUnit(id: string, team: Team, x: number, y: number, hp = 3, movement
     maxHp: hp,
     movement,
     position: { x, y },
+    abilityIds: [PUNCH_ID],
+    statuses: [],
   };
 }
 
@@ -33,6 +36,12 @@ describe('TacticalEngine', () => {
       expect(engine.state.phase).toBe('PLAYER_TURN');
       expect(engine.state.winner).toBeNull();
       expect(engine.state.selectedUnitId).toBeNull();
+      expect(engine.state.selectedAbilityId).toBeNull();
+      expect(engine.state.turnResources.p1).toEqual({
+        movementRemaining: 3,
+        actionRemaining: 1,
+        bonusActionRemaining: 1,
+      });
       expect(engine.state.log).toEqual([]);
     });
 
@@ -52,10 +61,11 @@ describe('TacticalEngine', () => {
         makeUnit('p1', 'PLAYER', 0, 0, 3, 3),
         makeUnit('e1', 'ENEMY', 4, 4, 2, 2),
       ]);
-      const keys = engine.getMovementRange('p1').map((p) => `${p.x},${p.y}`).sort();
-      expect(keys).toEqual(
-        ['0,1', '0,2', '0,3', '1,0', '1,1', '1,2', '2,0', '2,1', '3,0'].sort(),
-      );
+      const keys = engine
+        .getMovementRange('p1')
+        .map((p) => `${p.x},${p.y}`)
+        .sort();
+      expect(keys).toEqual(['0,1', '0,2', '0,3', '1,0', '1,1', '1,2', '2,0', '2,1', '3,0'].sort());
     });
 
     it('excludes blocked tiles', () => {
@@ -194,10 +204,9 @@ describe('TacticalEngine', () => {
     it('downs a unit at 0 hp, keeps it in units[], and refuses further attacks on it', () => {
       const engine = makeEngine([
         makeUnit('p1', 'PLAYER', 0, 0, 3, 3),
-        makeUnit('e1', 'ENEMY', 1, 0, 2, 2),
+        makeUnit('e1', 'ENEMY', 1, 0, 1, 2),
         makeUnit('e2', 'ENEMY', 5, 5, 2, 2),
       ]);
-      expect(engine.attack('p1', 'e1')).toBe(true); // 2 -> 1
       expect(engine.attack('p1', 'e1')).toBe(true); // 1 -> 0, downed
       expect(engine.state.units.find((u) => u.id === 'e1')!.hp).toBe(0);
       expect(engine.unitAt(1, 0)?.id).toBe('e1'); // still present on the board
@@ -336,10 +345,7 @@ describe('TacticalEngine', () => {
 
     it('detours around blocked tiles instead of walking through them', () => {
       const engine = makeEngine(
-        [
-          makeUnit('p1', 'PLAYER', 2, 0, 3, 3),
-          makeUnit('e1', 'ENEMY', 0, 0, 2, 2),
-        ],
+        [makeUnit('p1', 'PLAYER', 2, 0, 3, 3), makeUnit('e1', 'ENEMY', 0, 0, 2, 2)],
         [{ x: 1, y: 0 }],
       );
       engine.endTurn();
@@ -360,10 +366,7 @@ describe('TacticalEngine', () => {
 
     it('does nothing when no path to the player exists', () => {
       const engine = makeEngine(
-        [
-          makeUnit('p1', 'PLAYER', 2, 2, 3, 3),
-          makeUnit('e1', 'ENEMY', 0, 0, 2, 2),
-        ],
+        [makeUnit('p1', 'PLAYER', 2, 2, 3, 3), makeUnit('e1', 'ENEMY', 0, 0, 2, 2)],
         [
           { x: 0, y: 1 },
           { x: 1, y: 0 },
@@ -411,10 +414,7 @@ describe('TacticalEngine', () => {
   describe('board helpers', () => {
     it('unitAt and isBlocked report board contents', () => {
       const engine = makeEngine(
-        [
-          makeUnit('p1', 'PLAYER', 0, 0, 3, 3),
-          makeUnit('e1', 'ENEMY', 4, 4, 2, 2),
-        ],
+        [makeUnit('p1', 'PLAYER', 0, 0, 3, 3), makeUnit('e1', 'ENEMY', 4, 4, 2, 2)],
         [{ x: 3, y: 3 }],
       );
       expect(engine.unitAt(0, 0)?.id).toBe('p1');

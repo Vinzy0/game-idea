@@ -81,14 +81,39 @@ Remove Enemy B
 
 This keeps mechanics testable and prevents the rendering layer from becoming the entire game.
 
-## Current Phase 0 Layout
+## Phase 2 Ability Flow
+
+```text
+Ability data (catalog or encounter config)
+  → target validation + affected-unit resolution
+  → movement/action/bonus-action resource consumption
+  → generic effect executor (Damage | Heal | Push | Apply Status)
+  → combat state snapshot
+  → React HUD + Phaser renderer
+```
+
+- `Ability` definitions are immutable data: targeting, area, requirements, effects, cost, and presentation.
+- Units reference abilities by ID; encounter startup fails fast on an unknown ID.
+- `TacticalEngine.useAbility()` is the only effect-resolution command. The older `attack()` method is a compatibility adapter to the data-defined Punch ability.
+- Area targeting resolves recipients before effects execute, so one effect primitive works for both single-target and area abilities.
+- Phaser highlights engine-provided valid targets and never calculates range, allegiance, damage, healing, pushing, statuses, or costs.
+
+## Current Layout
 
 ```text
 src/
   main.tsx          React entry point
-  App.tsx           Minimal shell (title + GameCanvas)
+  App.tsx           Tactical prototype shell
   app/
     GameCanvas.tsx  Owns the Phaser.Game lifecycle (mount → create, unmount → destroy)
-  game/             (Phase 1+ — engine lives here, pure TS, no Phaser imports)
+    TacticalHud.tsx React command surface for resources and abilities
+  game/
+    abilities/
+      types.ts       Ability, targeting, area, cost, effect, status schemas
+      catalog.ts     Punch, Fireball, and Force Push data
+    combat/
+      engine.ts      Pure TypeScript rules, commands, and generic effect resolution
+    rendering/
+      CombatScene.ts Phaser-only presentation and pointer translation
 docs/               PRD + PHASES copies, architecture, rules, AI contracts, status
 ```

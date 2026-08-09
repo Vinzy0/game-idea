@@ -1,8 +1,10 @@
 /* global window, document */
-// QA playthrough driver for the Phase 1 ugly chess prototype.
+// QA playthrough driver retained for the Phase 2 tactical prototype.
 // Injected via <script src="/drive.js"> while the dev server is running.
 // Runs a hit-and-run kiting fight to completion and stores the result
 // in window.__driveResult. No framework deps; drives window.__game directly.
+// attack()/canAttack() are compatibility adapters to the data-defined Punch,
+// so this also stress-tests the generic ability pipeline through a full fight.
 (function () {
   function main() {
     const out = [];
@@ -135,7 +137,14 @@
       eng.endTurn();
       if (t % 5 === 4) {
         const es = eng.state.units.filter((u) => u.team === 'ENEMY' && u.hp > 0);
-        out.push('t' + t + ' heroHP=' + heroOf().hp + ' enemies=' + es.map((u) => u.id + ':' + u.hp).join(' '));
+        out.push(
+          't' +
+            t +
+            ' heroHP=' +
+            heroOf().hp +
+            ' enemies=' +
+            es.map((u) => u.id + ':' + u.hp).join(' '),
+        );
       }
     }
     const fs = eng.state;
