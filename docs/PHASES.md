@@ -4,6 +4,8 @@
 
 This document defines the required development order for the project.
 
+> **2026-08-14 persistent-world pivot:** Phases 0-5 remain unchanged and complete. For Phase 6 onward, `docs/PERSISTENT_WORLD_IMPLEMENTATION_HANDOFF.md` is the detailed execution authority where it conflicts with the older phase descriptions below. The next gate is Phase 6A: one always-visible 32x32 scene with exploration and combat on the same board. Implement and review one gate at a time.
+
 Its purpose is to:
 
 - keep development focused;

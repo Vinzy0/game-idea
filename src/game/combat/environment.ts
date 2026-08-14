@@ -40,6 +40,9 @@ const KIND_DEFAULTS: Record<ObjectKind, KindDefaults> = {
 
 export function createObject(config: MapObjectConfig): MapObject {
   const defaults = KIND_DEFAULTS[config.kind];
+  if (defaults === undefined) {
+    throw new Error(`Unknown map object kind: ${String(config.kind)}`);
+  }
   const hp = defaults.destructible ? (config.hp ?? defaults.defaultHp) : 0;
   return {
     id: config.id,

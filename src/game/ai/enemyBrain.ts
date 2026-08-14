@@ -9,7 +9,6 @@ export interface AiQueries {
   alivePlayers(): Unit[];
   getAbilitiesForUnit(unitId: string): Ability[];
   canUseAbility(casterId: string, abilityId: string, target: AbilityTarget): boolean;
-  getValidAbilityTargets(casterId: string, abilityId: string): AbilityTarget[];
   firstStepToward(from: GridPosition, to: GridPosition): GridPosition | null;
   moveUnit(unitId: string, x: number, y: number): boolean;
   useAbility(casterId: string, abilityId: string, target: AbilityTarget): boolean;
@@ -25,6 +24,13 @@ function totalDamage(ability: Ability): number {
     if (effect.kind === 'DAMAGE') total += effect.amount;
   }
   return total;
+}
+
+function hostileTargetFor(ability: Ability, target: Unit): AbilityTarget | null {
+  if (ability.targeting.kind === 'SELF') return null;
+  if (ability.targeting.kind === 'UNIT') return { kind: 'UNIT', unitId: target.id };
+  if (ability.area.shape === 'RADIUS' && ability.area.affects === 'ALLY') return null;
+  return { kind: 'TILE', x: target.position.x, y: target.position.y };
 }
 
 /**
@@ -49,13 +55,14 @@ export function planEnemyAction(unit: Unit, q: AiQueries): EnemyAction | null {
   let bestDamage = -1;
   let bestTarget: AbilityTarget | null = null;
   for (const ability of q.getAbilitiesForUnit(unit.id)) {
-    const targets = q.getValidAbilityTargets(unit.id, ability.id);
-    if (targets.length === 0) continue;
     const damage = totalDamage(ability);
+    if (damage <= 0) continue;
+    const abilityTarget = hostileTargetFor(ability, target);
+    if (abilityTarget === null || !q.canUseAbility(unit.id, ability.id, abilityTarget)) continue;
     if (damage > bestDamage) {
       bestAbility = ability;
       bestDamage = damage;
-      bestTarget = targets[0];
+      bestTarget = abilityTarget;
     }
   }
   if (bestAbility !== null && bestTarget !== null) {

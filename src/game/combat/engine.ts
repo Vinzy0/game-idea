@@ -7,14 +7,10 @@ import type {
   TargetTeam,
   TurnResources,
 } from '../abilities/types';
-import {
-  createObject,
-  movementCostAt,
-  objectBlocksMovement,
-  validateEnvironment,
-} from './environment';
+import { createObject, movementCostAt, objectBlocksMovement } from './environment';
 import type { MapObject } from './environment';
 import type { EngineState, GameConfig, GridPosition, Team, Unit } from './types';
+import { validateEncounterSetup } from './validation';
 
 const NEIGHBORS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
@@ -49,6 +45,7 @@ export class TacticalEngine {
     units: Unit[];
   };
   private readonly abilitiesById = new Map<string, Ability>();
+  private readonly listeners = new Set<() => void>();
   private current: EngineState;
 
   constructor(config: GameConfig) {
@@ -74,13 +71,13 @@ export class TacticalEngine {
       }
     }
 
-    const width = Math.max(1, config.width ?? 10);
-    const height = Math.max(1, config.height ?? 10);
+    const width = config.width ?? 10;
+    const height = config.height ?? 10;
     const objects = (config.objects ?? []).map((objectConfig) => createObject(objectConfig));
     const terrain = (config.terrain ?? []).map((position) => ({ ...position }));
-    const environmentErrors = validateEnvironment(objects, terrain, width, height);
-    if (environmentErrors.length > 0) {
-      throw new Error(`Invalid environment: ${environmentErrors.join('; ')}`);
+    const encounterErrors = validateEncounterSetup({ width, height, objects, terrain, units });
+    if (encounterErrors.length > 0) {
+      throw new Error(`Invalid encounter: ${encounterErrors.join('; ')}`);
     }
 
     this.initial = {
@@ -115,6 +112,12 @@ export class TacticalEngine {
       turnResources,
       log: [...this.current.log],
     };
+  }
+
+  /** Framework-agnostic state subscription for React, Phaser, and future app controllers. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   getAbility(abilityId: string): Ability | null {
@@ -178,6 +181,7 @@ export class TacticalEngine {
     unit.position = { x, y };
     this.current.turnResources[unit.id].movementRemaining -= option.distance;
     this.current.log.push(`${unit.name} moved to (${x},${y})`);
+    this.notifyListeners();
     return true;
   }
 
@@ -190,6 +194,7 @@ export class TacticalEngine {
   selectAbility(abilityId: string | null): boolean {
     if (abilityId === null) {
       this.current.selectedAbilityId = null;
+      this.notifyListeners();
       return true;
     }
 
@@ -197,6 +202,7 @@ export class TacticalEngine {
       this.current.selectedUnitId === null ? null : this.findUnit(this.current.selectedUnitId);
     if (selected === null || !this.canSelectAbility(selected.id, abilityId)) return false;
     this.current.selectedAbilityId = abilityId;
+    this.notifyListeners();
     return true;
   }
 
@@ -259,6 +265,26 @@ export class TacticalEngine {
     }
     this.checkGameOver();
     this.current.selectedAbilityId = null;
+    this.notifyListeners();
+    return true;
+  }
+
+  canInteract(unitId: string, objectId: string): boolean {
+    const unit = this.findUnit(unitId);
+    const object = this.current.objects.find((candidate) => candidate.id === objectId);
+    if (unit === null || object === undefined) return false;
+    if (unit.hp <= 0 || this.activeTeam() !== unit.team) return false;
+    if (!object.interactable) return false;
+    if (manhattanDistance(unit.position, object.position) !== 1) return false;
+    const resources = this.current.turnResources[unit.id];
+    if (resources === undefined || resources.actionRemaining <= 0) return false;
+    if (
+      object.kind === 'DOOR' &&
+      object.open &&
+      this.isOccupiedByAliveUnit(object.position.x, object.position.y)
+    ) {
+      return false;
+    }
     return true;
   }
 
@@ -267,15 +293,10 @@ export class TacticalEngine {
    * Action; other interactable kinds consume the cost without extra effect.
    */
   interact(unitId: string, objectId: string): boolean {
-    const unit = this.findUnit(unitId);
-    const object = this.current.objects.find((candidate) => candidate.id === objectId);
-    if (unit === null || object === undefined) return false;
-    if (unit.hp <= 0 || this.activeTeam() !== unit.team) return false;
-    if (this.current.phase !== 'PLAYER_TURN') return false;
-    if (!object.interactable) return false;
-    if (manhattanDistance(unit.position, object.position) !== 1) return false;
+    if (!this.canInteract(unitId, objectId)) return false;
+    const unit = this.findUnit(unitId)!;
+    const object = this.current.objects.find((candidate) => candidate.id === objectId)!;
     const resources = this.current.turnResources[unit.id];
-    if (resources === undefined || resources.actionRemaining <= 0) return false;
 
     resources.actionRemaining -= 1;
     if (object.kind === 'DOOR') {
@@ -284,6 +305,7 @@ export class TacticalEngine {
         object.open ? `${unit.name} opens the door` : `${unit.name} closes the door`,
       );
     }
+    this.notifyListeners();
     return true;
   }
 
@@ -300,6 +322,7 @@ export class TacticalEngine {
   selectUnit(unitId: string): void {
     this.current.selectedUnitId = this.findUnit(unitId) === null ? null : unitId;
     this.current.selectedAbilityId = null;
+    this.notifyListeners();
   }
 
   endTurn(): void {
@@ -319,10 +342,12 @@ export class TacticalEngine {
       this.startTurn('PLAYER');
       this.current.log.push('--- PLAYER TURN ---');
     }
+    this.notifyListeners();
   }
 
   reset(): void {
     this.current = this.buildInitialState();
+    this.notifyListeners();
   }
 
   // ---- ability internals ----
@@ -427,6 +452,7 @@ export class TacticalEngine {
   }
 
   private damageObject(caster: Unit, object: MapObject, amount: number): void {
+    if (object.hp <= 0) return;
     const damage = Math.max(0, Math.floor(amount));
     object.hp = Math.max(0, object.hp - damage);
     this.current.log.push(
@@ -699,6 +725,10 @@ export class TacticalEngine {
       this.current.winner = 'PLAYER';
       this.current.log.push('Victory! All enemy units are downed');
     }
+  }
+
+  private notifyListeners(): void {
+    for (const listener of [...this.listeners]) listener();
   }
 
   /**

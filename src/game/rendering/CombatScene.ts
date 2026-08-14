@@ -46,8 +46,11 @@ export class CombatScene extends Phaser.Scene {
   create() {
     this.graphics = this.add.graphics();
     this.input.on('pointerdown', this.handleClick, this);
-    // Poll for state changes (e.g. End Turn via the React HUD) and redraw.
-    this.time.addEvent({ delay: 250, loop: true, callback: () => this.drawIfChanged() });
+    const unsubscribe = this.engine?.subscribe(() => {
+      if (this.sys.isActive()) this.drawIfChanged();
+    });
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => unsubscribe?.());
+    this.events.once(Phaser.Scenes.Events.DESTROY, () => unsubscribe?.());
     this.drawIfChanged();
   }
 
@@ -90,10 +93,7 @@ export class CombatScene extends Phaser.Scene {
             : unit
               ? ({ kind: 'UNIT', unitId: unit.id } as const)
               : null;
-        if (target && engine.useAbility(selected.id, ability.id, target)) {
-          this.drawIfChanged();
-          return;
-        }
+        if (target && engine.useAbility(selected.id, ability.id, target)) return;
         if (unit && unit.team === 'PLAYER' && unit.hp > 0) engine.selectUnit(unit.id);
       } else if (unit && unit.team === 'PLAYER' && unit.hp > 0) {
         engine.selectUnit(unit.id);
@@ -103,34 +103,24 @@ export class CombatScene extends Phaser.Scene {
         selected &&
         selected.hp > 0 &&
         selected.team === 'PLAYER' &&
-        this.tryInteract(selected.id, selected.position, tile.x, tile.y, state)
+        this.tryInteract(selected.id, tile.x, tile.y, state)
       ) {
         // interact() succeeded — nothing else to do.
       } else {
         engine.selectUnit(''); // deselect (unknown id => null)
       }
     }
-    this.drawIfChanged();
   }
 
   /**
    * Click routing helper: if the clicked tile holds an interactable object and
-   * the selected (living player) unit stands adjacent to it, interact.
+   * the engine authorizes the selected unit's interaction, execute it.
    */
-  private tryInteract(
-    unitId: string,
-    unitPosition: GridPosition,
-    x: number,
-    y: number,
-    state: EngineState,
-  ): boolean {
+  private tryInteract(unitId: string, x: number, y: number, state: EngineState): boolean {
     const object = state.objects.find(
       (candidate) => candidate.position.x === x && candidate.position.y === y,
     );
-    if (object === undefined || !object.interactable) return false;
-    const distance =
-      Math.abs(unitPosition.x - object.position.x) + Math.abs(unitPosition.y - object.position.y);
-    if (distance !== 1) return false;
+    if (object === undefined) return false;
     return this.engine?.interact(unitId, object.id) ?? false;
   }
 

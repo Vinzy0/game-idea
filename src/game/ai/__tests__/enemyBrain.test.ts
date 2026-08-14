@@ -19,14 +19,16 @@ function makeUnit(id: string, x: number, y: number, hp = 3): Unit {
   };
 }
 
-function makeAbility(id: string, damage: number): Ability {
+function makeAbility(id: string, damage: number, targeting: 'UNIT' | 'TILE' = 'UNIT'): Ability {
   return {
     id,
     name: id,
     description: id,
     actionCost: 'ACTION',
-    targeting: { kind: 'UNIT', team: 'ENEMY', range: 1 },
-    area: { shape: 'SINGLE' },
+    targeting:
+      targeting === 'UNIT' ? { kind: 'UNIT', team: 'ENEMY', range: 1 } : { kind: 'TILE', range: 6 },
+    area:
+      targeting === 'UNIT' ? { shape: 'SINGLE' } : { shape: 'RADIUS', radius: 1, affects: 'ENEMY' },
     requirements: [],
     effects: damage > 0 ? [{ kind: 'DAMAGE', amount: damage }] : [],
     presentation: { color: 0xff7777, verb: 'attacks' },
@@ -38,7 +40,6 @@ function makeQueries(overrides: Partial<AiQueries>): AiQueries {
     alivePlayers: () => [],
     getAbilitiesForUnit: () => [],
     canUseAbility: () => false,
-    getValidAbilityTargets: () => [],
     firstStepToward: () => null,
     moveUnit: () => false,
     useAbility: () => false,
@@ -54,14 +55,14 @@ describe('planEnemyAction', () => {
     expect(planEnemyAction(unit, queries)).toBeNull();
   });
 
-  it('uses an in-range ability, targeting its first valid target', () => {
+  it('uses an in-range ability against the chosen hostile target', () => {
     const punch = makeAbility('punch', 1);
     const unit = makeUnit('e1', 0, 0);
     const player = makeUnit('p1', 1, 0);
     const queries = makeQueries({
       alivePlayers: () => [player],
       getAbilitiesForUnit: () => [punch],
-      getValidAbilityTargets: () => [{ kind: 'UNIT', unitId: 'p1' }],
+      canUseAbility: () => true,
     });
 
     expect(planEnemyAction(unit, queries)).toEqual({
@@ -73,25 +74,19 @@ describe('planEnemyAction', () => {
 
   it('picks the highest-damage ability when several are in range', () => {
     const punch = makeAbility('punch', 1);
-    const fireball = makeAbility('fireball', 2);
+    const fireball = makeAbility('fireball', 2, 'TILE');
     const unit = makeUnit('e1', 0, 0);
     const player = makeUnit('p1', 2, 0);
     const queries = makeQueries({
       alivePlayers: () => [player],
       getAbilitiesForUnit: () => [punch, fireball],
-      getValidAbilityTargets: (_casterId, abilityId) =>
-        abilityId === 'fireball'
-          ? [
-              { kind: 'TILE', x: 1, y: 0 },
-              { kind: 'TILE', x: 2, y: 0 },
-            ]
-          : [{ kind: 'UNIT', unitId: 'p1' }],
+      canUseAbility: () => true,
     });
 
     expect(planEnemyAction(unit, queries)).toEqual({
       type: 'USE_ABILITY',
       abilityId: 'fireball',
-      target: { kind: 'TILE', x: 1, y: 0 }, // the first valid target
+      target: { kind: 'TILE', x: 2, y: 0 },
     });
   });
 
@@ -102,7 +97,7 @@ describe('planEnemyAction', () => {
     const queries = makeQueries({
       alivePlayers: () => [player],
       getAbilitiesForUnit: () => [punch],
-      getValidAbilityTargets: () => [],
+      canUseAbility: () => false,
       firstStepToward: () => ({ x: 1, y: 0 }),
     });
 
@@ -116,7 +111,6 @@ describe('planEnemyAction', () => {
     let stepTo: GridPosition | null = null;
     const queries = makeQueries({
       alivePlayers: () => [healthy, hurt],
-      getValidAbilityTargets: () => [],
       firstStepToward: (_from, to) => {
         stepTo = to;
         return null;
@@ -132,7 +126,6 @@ describe('planEnemyAction', () => {
     const player = makeUnit('p1', 3, 0);
     const queries = makeQueries({
       alivePlayers: () => [player],
-      getValidAbilityTargets: () => [],
       firstStepToward: () => null,
     });
 
@@ -146,7 +139,7 @@ describe('planEnemyAction', () => {
     const queries = makeQueries({
       alivePlayers: () => [player],
       getAbilitiesForUnit: () => [punch],
-      getValidAbilityTargets: () => [],
+      canUseAbility: () => false,
       firstStepToward: () => ({ x: 0, y: 1 }),
     });
 
@@ -161,7 +154,7 @@ describe('planEnemyAction', () => {
     const queries = makeQueries({
       alivePlayers: () => [player],
       getAbilitiesForUnit: () => [punch, push],
-      getValidAbilityTargets: () => [{ kind: 'UNIT', unitId: 'p1' }],
+      canUseAbility: () => true,
     });
 
     expect(planEnemyAction(unit, queries)).toEqual({
@@ -169,5 +162,19 @@ describe('planEnemyAction', () => {
       abilityId: 'punch',
       target: { kind: 'UNIT', unitId: 'p1' },
     });
+  });
+
+  it('does not spend an action on a non-damaging ability', () => {
+    const utility = makeAbility('utility', 0);
+    const unit = makeUnit('e1', 0, 0);
+    const player = makeUnit('p1', 3, 0);
+    const queries = makeQueries({
+      alivePlayers: () => [player],
+      getAbilitiesForUnit: () => [utility],
+      canUseAbility: () => true,
+      firstStepToward: () => ({ x: 1, y: 0 }),
+    });
+
+    expect(planEnemyAction(unit, queries)).toEqual({ type: 'MOVE', x: 1, y: 0 });
   });
 });

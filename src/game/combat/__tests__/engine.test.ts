@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FIREBALL_ID, PUNCH_ID } from '../../abilities/catalog';
+import type { Ability } from '../../abilities/types';
 import { TacticalEngine, aliveUnits } from '../engine';
 import type { MapObjectConfig } from '../environment';
 import type { GridPosition, Team, Unit } from '../types';
@@ -254,6 +255,18 @@ describe('TacticalEngine', () => {
       expect(engine.state.objects.find((o) => o.id === 'door')!.open).toBe(false);
       expect(engine.state.log).toContain('P1 closes the door');
     });
+
+    it('does not close an open door while a living unit occupies its tile', () => {
+      const engine = makeEngine(
+        [makeUnit('p1', 'PLAYER', 0, 0), makeUnit('p2', 'PLAYER', 2, 0)],
+        [{ id: 'door', kind: 'DOOR', x: 1, y: 0 }],
+      );
+      expect(engine.interact('p1', 'door')).toBe(true);
+      expect(engine.moveUnit('p1', 1, 0)).toBe(true);
+      expect(engine.canInteract('p2', 'door')).toBe(false);
+      expect(engine.interact('p2', 'door')).toBe(false);
+      expect(engine.state.objects.find((object) => object.id === 'door')!.open).toBe(true);
+    });
   });
 
   describe('destructible objects', () => {
@@ -314,6 +327,57 @@ describe('TacticalEngine', () => {
       expect(engine.useAbility('p1', FIREBALL_ID, { kind: 'TILE', x: 3, y: 0 })).toBe(false);
       // A free tile next to them stays targetable.
       expect(engine.useAbility('p1', FIREBALL_ID, { kind: 'TILE', x: 2, y: 0 })).toBe(true);
+    });
+
+    it('destroys an object only once when an ability has multiple damage effects', () => {
+      const doubleBlast: Ability = {
+        id: 'double-blast',
+        name: 'Double Blast',
+        description: 'Two damage effects in one ability.',
+        actionCost: 'ACTION',
+        targeting: { kind: 'TILE', range: 4 },
+        area: { shape: 'SINGLE' },
+        requirements: [],
+        effects: [
+          { kind: 'DAMAGE', amount: 2 },
+          { kind: 'DAMAGE', amount: 2 },
+        ],
+        presentation: { color: 0xffffff, verb: 'blasts' },
+      };
+      const engine = new TacticalEngine({
+        width: 5,
+        height: 5,
+        abilities: [doubleBlast],
+        units: [
+          { ...makeUnit('p1', 'PLAYER', 0, 0), abilityIds: [doubleBlast.id] },
+          makeUnit('e1', 'ENEMY', 4, 4),
+        ],
+        objects: [{ id: 'barrel', kind: 'BARREL', x: 2, y: 0 }],
+      });
+
+      expect(engine.useAbility('p1', doubleBlast.id, { kind: 'TILE', x: 2, y: 0 })).toBe(true);
+      expect(
+        engine.state.log.filter((entry) => entry.includes('destroys the barrel')),
+      ).toHaveLength(1);
+    });
+  });
+
+  describe('subscriptions', () => {
+    it('notifies subscribers for successful mutations and supports unsubscribe', () => {
+      const engine = makeEngine([makeUnit('p1', 'PLAYER', 0, 0)]);
+      let notifications = 0;
+      const unsubscribe = engine.subscribe(() => {
+        notifications += 1;
+      });
+
+      expect(engine.moveUnit('p1', 1, 0)).toBe(true);
+      expect(notifications).toBe(1);
+      expect(engine.moveUnit('p1', 99, 99)).toBe(false);
+      expect(notifications).toBe(1);
+
+      unsubscribe();
+      engine.reset();
+      expect(notifications).toBe(1);
     });
   });
 
@@ -490,8 +554,7 @@ describe('TacticalEngine', () => {
         makeUnit('e1', 'ENEMY', 1, 0, 2, 2),
       ]);
       engine.endTurn();
-      // Both players are 1 tile away; the enemy hits the lower-HP one (p2),
-      // which is also the first valid target in unit order.
+      // Both players are 1 tile away; the enemy hits the lower-HP one (p2).
       expect(engine.state.units.find((u) => u.id === 'p2')!.hp).toBe(0);
       expect(engine.state.units.find((u) => u.id === 'p1')!.hp).toBe(3);
       expect(engine.state.log).toContain('E1 attacks P2 for 1 damage');
@@ -590,11 +653,24 @@ describe('TacticalEngine', () => {
         },
       ]);
       engine.endTurn();
-      // Row-major tile targeting makes (0,0) Fireball's first valid target; the
-      // player at (1,0) sits inside its radius, so the 2-damage Fireball wins.
+      // Fireball targets the chosen player directly, so the 2-damage ability wins.
       expect(engine.state.units.find((u) => u.id === 'p1')!.hp).toBe(1); // 3 - 2
       expect(engine.state.log).toContain('E1 blasts P1 for 2 damage');
       expect(engine.state.log).not.toContain('E1 attacks P1');
+    });
+
+    it('aims TILE abilities at the chosen player instead of an arbitrary empty tile', () => {
+      const engine = makeEngine([
+        makeUnit('p1', 'PLAYER', 5, 0, 3, 3),
+        {
+          ...makeUnit('e1', 'ENEMY', 5, 5, 3, 2),
+          abilityIds: [FIREBALL_ID],
+        },
+      ]);
+
+      engine.endTurn();
+      expect(engine.state.units.find((unit) => unit.id === 'p1')!.hp).toBe(1);
+      expect(engine.state.log).toContain('E1 blasts P1 for 2 damage');
     });
 
     it('moves toward the nearest player when no ability is in range', () => {
@@ -692,7 +768,7 @@ describe('TacticalEngine', () => {
             units: [makeUnit('p1', 'PLAYER', 0, 0, 3, 3)],
             objects: [{ id: 'wall-1', kind: 'WALL', x: 10, y: 0 }],
           }),
-      ).toThrow(/Invalid environment:.*out of bounds/);
+      ).toThrow(/Invalid encounter:.*out of bounds/);
     });
 
     it('throws at construction when terrain overlaps an object', () => {
@@ -703,7 +779,7 @@ describe('TacticalEngine', () => {
             objects: [{ id: 'barrel-1', kind: 'BARREL', x: 2, y: 2 }],
             terrain: [{ x: 2, y: 2 }],
           }),
-      ).toThrow(/Invalid environment:.*overlaps/);
+      ).toThrow(/Invalid encounter:.*overlaps/);
     });
   });
 

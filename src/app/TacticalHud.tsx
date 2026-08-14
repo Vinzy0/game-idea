@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
 import type { TacticalEngine } from '../game/combat/engine';
-import { watchEngine } from '../game/rendering/engineEvents';
 
 /** React command surface for turn resources and data-defined abilities. */
 export default function TacticalHud({ engine }: { engine: TacticalEngine }) {
   const [, setTick] = useState(0);
 
-  useEffect(() => watchEngine(engine, () => setTick((tick) => tick + 1)), [engine]);
+  useEffect(() => engine.subscribe(() => setTick((tick) => tick + 1)), [engine]);
 
   const state = engine.state;
   const selected = state.units.find((unit) => unit.id === state.selectedUnitId) ?? null;
@@ -15,17 +14,11 @@ export default function TacticalHud({ engine }: { engine: TacticalEngine }) {
   const resources = selected === null ? null : state.turnResources[selected.id];
   const abilities = selected === null ? [] : engine.getAbilitiesForUnit(selected.id);
 
-  // Interactable objects adjacent to the selected living player unit, in state order.
+  // Engine-authorized interactions in state order; React owns no interaction rules.
   const adjacentInteractables =
-    selected === null || selected.hp <= 0 || selected.team !== 'PLAYER'
+    selected === null
       ? []
-      : state.objects.filter((object) => {
-          if (!object.interactable) return false;
-          const distance =
-            Math.abs(selected.position.x - object.position.x) +
-            Math.abs(selected.position.y - object.position.y);
-          return distance === 1;
-        });
+      : state.objects.filter((object) => engine.canInteract(selected.id, object.id));
   const interactTarget = adjacentInteractables[0] ?? null;
 
   const banner =
@@ -60,7 +53,9 @@ export default function TacticalHud({ engine }: { engine: TacticalEngine }) {
           </span>
         )}
         <button
-          onClick={() => interactTarget !== null && engine.interact(selected!.id, interactTarget.id)}
+          onClick={() =>
+            interactTarget !== null && engine.interact(selected!.id, interactTarget.id)
+          }
           disabled={interactTarget === null}
           title={
             adjacentInteractables.length > 0

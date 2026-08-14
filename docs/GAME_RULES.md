@@ -65,7 +65,7 @@ Not every character must have useful bonus actions.
 Brain v1 decides every enemy action during the enemy turn, re-planning after each executed action:
 
 1. Pick the nearest living player (Manhattan distance); ties break toward the lower-HP player.
-2. Use the highest-damage ability that has a legal target in range; ties prefer the first ability in list order, and the first valid target is used.
+2. Aim the highest-damage legal ability at that chosen player; UNIT abilities target the unit and TILE abilities target the player's position. Ties prefer the first ability in list order.
 3. Otherwise take one step along the shortest legal path toward the chosen player.
 4. Otherwise end that enemy's turn (with a safety cap of 32 actions per enemy).
 
@@ -96,7 +96,8 @@ Maps are configured with objects and difficult-terrain tiles. The engine validat
 
 - `interact` costs **1 Action** and requires the unit to stand adjacent (Manhattan distance 1) to an interactable object.
 - A DOOR toggles between open and closed; a closed door blocks movement, an open door does not.
-- Only the active team's living units can interact, during the player turn.
+- Only the active team's living units can interact.
+- An open door cannot be closed while a living unit occupies the doorway.
 
 ### Destructible Objects
 
@@ -135,3 +136,12 @@ Possible narrative outcomes:
 Permanent player-character death is **OFF by default**.
 Permadeath may be enabled through settings.
 Major companions and villains should also receive protection depending on DM settings.
+
+## Narrative Authority (Phase 5)
+
+- AI narration can change narrative context but cannot directly change tactical HP, positions, resources, abilities, objects, turns, or encounter outcomes.
+- `PROTECTED` and `DEFAULT` stories require explicit approval before a major irreversible proposal becomes canon.
+- `UNRESTRICTED` is explicit standing permission selected during setup. Major proposals may apply automatically, but a visible system record is always added.
+- Declining a proposal preserves the pre-proposal situation and records the decision.
+- Invalid, aborted, or failed provider responses leave the current story recoverable through Retry and never append a duplicate player message.
+- The offline provider is always labeled Demo. A live provider must be reached through a trusted gateway; browser configuration never contains an API key.

@@ -1,11 +1,24 @@
-import { useMemo } from 'react';
-import GameCanvas from './app/GameCanvas';
-import TacticalHud from './app/TacticalHud';
-import { TacticalEngine } from './game/combat/engine';
-import { createDemoScenario } from './game/combat/demoScenario';
+import { lazy, Suspense, useMemo, useState } from 'react';
+import { createProvider, loadProviderConfig } from './ai/factory';
+import NarrativeDm from './app/NarrativeDm';
+
+const CombatDemo = lazy(() => import('./app/CombatDemo'));
+
+type AppMode = 'narrative' | 'combat';
+
+const tabStyle = (active: boolean): React.CSSProperties => ({
+  padding: '5px 14px',
+  borderRadius: 6,
+  border: '1px solid #30363d',
+  background: active ? '#1f6feb' : '#161b22',
+  color: '#e6edf3',
+  cursor: 'pointer',
+  fontSize: 13,
+});
 
 function App() {
-  const engine = useMemo(() => new TacticalEngine(createDemoScenario()), []);
+  const [mode, setMode] = useState<AppMode>('narrative');
+  const provider = useMemo(() => createProvider(loadProviderConfig()), []);
 
   return (
     <div
@@ -14,6 +27,9 @@ function App() {
         background: '#0d1117',
         color: '#e6edf3',
         minHeight: '100vh',
+        width: '100%',
+        boxSizing: 'border-box',
+        overflowX: 'hidden',
         padding: 16,
         display: 'flex',
         flexDirection: 'column',
@@ -21,13 +37,39 @@ function App() {
       }}
     >
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>AI-DM Tactical RPG</h1>
-      <p style={{ fontSize: 13, color: '#8b949e', marginTop: 0 }}>
-        Phase 4 — Tactical Environment. Select your blue hero, move on green tiles (dark striped =
-        difficult terrain), pick Punch, Fireball, or Force Push and click a highlighted target,
-        click the door to interact, and watch the enemy AI come at you.
-      </p>
-      <TacticalHud engine={engine} />
-      <GameCanvas engine={engine} />
+      <div
+        role="tablist"
+        aria-label="App mode"
+        style={{ display: 'flex', gap: 8, marginBottom: 12 }}
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'narrative'}
+          aria-pressed={mode === 'narrative'}
+          onClick={() => setMode('narrative')}
+          style={tabStyle(mode === 'narrative')}
+        >
+          Narrative DM
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'combat'}
+          aria-pressed={mode === 'combat'}
+          onClick={() => setMode('combat')}
+          style={tabStyle(mode === 'combat')}
+        >
+          Combat Demo
+        </button>
+      </div>
+      {mode === 'narrative' ? (
+        <NarrativeDm provider={provider} />
+      ) : (
+        <Suspense fallback={<p style={{ color: '#8b949e' }}>Loading combat demo…</p>}>
+          <CombatDemo />
+        </Suspense>
+      )}
     </div>
   );
 }

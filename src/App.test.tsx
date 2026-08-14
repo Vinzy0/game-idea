@@ -1,16 +1,33 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import App from './App';
 
-// Phaser needs a real canvas/WebGL context — not available in jsdom.
-// Mock the canvas host so the shell can be tested without a browser.
-vi.mock('./app/GameCanvas', () => ({
-  default: () => <div data-testid="game-canvas" />,
+// The combat demo is a lazy chunk; stub it so jsdom never touches Phaser.
+vi.mock('./app/CombatDemo', () => ({
+  default: () => <div data-testid="combat-demo" />,
 }));
 
 describe('App shell', () => {
-  it('renders the title', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('renders the narrative DM by default', () => {
     render(<App />);
     expect(screen.getByRole('heading', { name: 'AI-DM Tactical RPG' })).toBeInTheDocument();
-    expect(screen.getByTestId('game-canvas')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Narrative DM' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByRole('form', { name: 'Story setup' })).toBeInTheDocument();
+  });
+
+  it('switches to the lazily loaded combat demo', async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Combat Demo' }));
+    expect(await screen.findByTestId('combat-demo')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Combat Demo' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 });
