@@ -69,7 +69,7 @@ export function validateEncounterSetup(setup: EncounterSetup): string[] {
     errors.push(`Duplicate unit id: ${duplicate}`);
   }
 
-  const validTeams: readonly Team[] = ['PLAYER', 'ENEMY'];
+  const validTeams: readonly Team[] = ['PLAYER', 'ENEMY', 'NEUTRAL'];
   const validControllers: readonly Controller[] = ['PLAYER', 'AI'];
   const occupied = new Set<string>();
   for (const unit of units) {

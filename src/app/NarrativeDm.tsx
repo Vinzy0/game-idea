@@ -1,11 +1,13 @@
 /**
  * Phase 5 AI DM narrative UI: player setup → DM chat transcript with
  * loading/error/retry, proposal approval, story summary, and reset.
- * This is the default app mode; the combat demo lives behind a lazy chunk.
+ * Phase 6A: lives in the Story tab of the always-on board shell and reports a
+ * story digest for the World tab.
  */
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import type { AIProvider, NarrativeAuthority, NarrativeMessageRole } from '../ai/provider';
 import { useNarrativeDm } from './useNarrativeDm';
+import type { StoryDigest } from './WorldPanel';
 
 const panel: React.CSSProperties = {
   fontFamily: 'system-ui, sans-serif',
@@ -44,7 +46,13 @@ const roleLabel: Record<NarrativeMessageRole, string> = {
   system: 'System',
 };
 
-export default function NarrativeDm({ provider }: { provider: AIProvider }) {
+export default function NarrativeDm({
+  provider,
+  onStoryDigestChange,
+}: {
+  provider: AIProvider;
+  onStoryDigestChange?: (digest: StoryDigest | null) => void;
+}) {
   const dm = useNarrativeDm(provider);
   const [name, setName] = useState('');
   const [archetype, setArchetype] = useState('');
@@ -53,6 +61,19 @@ export default function NarrativeDm({ provider }: { provider: AIProvider }) {
   const [tone, setTone] = useState('moody, witty, second person');
   const [authority, setAuthority] = useState<NarrativeAuthority>('DEFAULT');
   const [draft, setDraft] = useState('');
+
+  // Report the story digest to the shell (World tab + board dimming).
+  useEffect(() => {
+    onStoryDigestChange?.(
+      dm.story === null
+        ? null
+        : {
+            situation: dm.story.situation,
+            unresolvedThreads: dm.story.unresolvedThreads,
+          },
+    );
+    // Digest only: not every transient phase.
+  }, [dm.story, onStoryDigestChange]);
 
   const canStart = name.trim() !== '' && archetype.trim() !== '' && !dm.starting;
 
