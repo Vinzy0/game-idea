@@ -1,5 +1,6 @@
 import type { TacticalEngine } from '../game/combat/engine';
 import type { SceneExitMarker } from '../game/scenes/schoolHallwayScene';
+import type { BubbleManager } from '../game/dialogue/bubbles';
 import GameCanvas from './GameCanvas';
 import TacticalHud from './TacticalHud';
 
@@ -13,10 +14,12 @@ export default function WorldBoard({
   engine,
   exits = [],
   dimmed = false,
+  bubbles,
 }: {
   engine: TacticalEngine;
   exits?: SceneExitMarker[];
   dimmed?: boolean;
+  bubbles?: BubbleManager;
 }) {
   return (
     <div
@@ -45,7 +48,7 @@ export default function WorldBoard({
           transition: 'opacity 0.3s ease',
         }}
       >
-        <GameCanvas engine={engine} exits={exits} />
+        <GameCanvas engine={engine} exits={exits} bubbles={bubbles} />
       </div>
       <TacticalHud engine={engine} />
     </div>

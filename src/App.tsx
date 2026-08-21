@@ -1,9 +1,12 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { createProvider, loadProviderConfig } from './ai/factory';
 import NarrativeDm from './app/NarrativeDm';
+import { useNarrativeDm } from './app/useNarrativeDm';
+import { useEncounter } from './app/useEncounter';
 import WorldBoard from './app/WorldBoard';
 import WorldPanel, { type StoryDigest } from './app/WorldPanel';
 import DetailsPanel from './app/DetailsPanel';
+import { BubbleManager } from './game/dialogue/bubbles';
 import { createSchoolHallwayScene } from './game/scenes/schoolHallwayScene';
 import { TacticalEngine } from './game/combat/engine';
 
@@ -38,6 +41,63 @@ function useNarrowViewport(): boolean {
   return narrow;
 }
 
+/** Mid-combat talk box (Phase 7): one input, nearest living enemy answers. */
+function TalkBox({
+  engine,
+  targetName,
+  busy,
+  onTalk,
+}: {
+  engine: TacticalEngine;
+  targetName: string | null;
+  busy: boolean;
+  onTalk: (line: string) => void;
+}) {
+  const [, setTick] = useState(0);
+  useEffect(() => engine.subscribe(() => setTick((tick) => tick + 1)), [engine]);
+  const [draft, setDraft] = useState('');
+
+  const inCombat = engine.state.phase === 'PLAYER_TURN' || engine.state.phase === 'ENEMY_TURN';
+  const heroAlive = engine.state.units.some((unit) => unit.team === 'PLAYER' && unit.hp > 0);
+  if (!inCombat || !heroAlive || targetName === null) return null;
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (draft.trim() === '' || busy) return;
+    onTalk(draft);
+    setDraft('');
+  };
+
+  return (
+    <form
+      onSubmit={submit}
+      aria-label="Combat talk"
+      style={{ display: 'flex', gap: 6, padding: '0 0 6px', alignItems: 'center' }}
+    >
+      <span style={{ fontSize: 12, color: '#8b949e', flexShrink: 0 }}>Talk to {targetName}</span>
+      <input
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        placeholder="Say something mid-fight…"
+        disabled={busy}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: '#161b22',
+          color: '#e6edf3',
+          border: '1px solid #30363d',
+          borderRadius: 6,
+          padding: '4px 8px',
+          fontSize: 13,
+        }}
+      />
+      <button type="submit" disabled={busy || draft.trim() === ''} style={{ padding: '4px 12px' }}>
+        {busy ? '…' : 'Say'}
+      </button>
+    </form>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState<RightTab>('story');
   const [digest, setDigest] = useState<StoryDigest | null>(null);
@@ -45,10 +105,19 @@ function App() {
   const provider = useMemo(() => createProvider(loadProviderConfig()), []);
   const narrow = useNarrowViewport();
 
-  // One always-on board: the scene engine lives here and is shared by the
-  // board, the Details panel, and the World panel.
+  // One DM chat lifecycle at the shell level so encounters can talk to it.
+  const dm = useNarrativeDm(provider);
+  const bubbles = useMemo(() => new BubbleManager(), []);
+  const encounter = useEncounter(provider, dm, bubbles);
+
+  // Legacy exploration scene owns the board until an AI encounter replaces it.
   const scene = useMemo(() => createSchoolHallwayScene(), []);
-  const engine = useMemo(() => new TacticalEngine(scene.config), [scene]);
+  const legacyEngine = useMemo(() => new TacticalEngine(scene.config), [scene]);
+  const readyStage = encounter.stage.kind === 'ready' ? encounter.stage : null;
+  const encounterActive = readyStage !== null;
+  const boardEngine = readyStage?.engine ?? legacyEngine;
+
+  const storyIdle = dm.story !== null && dm.story.phase === 'IDLE';
 
   if (showDevFixture) {
     return (
@@ -122,7 +191,53 @@ function App() {
               : { flex: 1, minWidth: 0, minHeight: 0 }
           }
         >
-          <WorldBoard engine={engine} exits={scene.exits} dimmed={digest === null} />
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 4 }}>
+            {encounterActive && (
+              <div
+                aria-label="Encounter banner"
+                style={{
+                  display: 'flex',
+                  gap: 10,
+                  alignItems: 'center',
+                  fontSize: 13,
+                  background: '#161b22',
+                  border: '1px solid #d29922',
+                  borderRadius: 8,
+                  padding: '4px 10px',
+                }}
+              >
+                <strong>⚔ {readyStage.encounter.title}</strong>
+                {readyStage.warnings.length > 0 && (
+                  <span style={{ color: '#d29922', fontSize: 12 }} title={readyStage.warnings.join('\n')}>
+                    {readyStage.warnings.length} validator adjustment(s)
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={encounter.dismiss}
+                  style={{ ...tabStyle(false), marginLeft: 'auto' }}
+                >
+                  Return to Story
+                </button>
+              </div>
+            )}
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <WorldBoard
+                engine={boardEngine}
+                exits={encounterActive ? [] : scene.exits}
+                dimmed={digest === null && !encounterActive}
+                bubbles={bubbles}
+              />
+            </div>
+            {readyStage !== null && (
+              <TalkBox
+                engine={readyStage.engine}
+                targetName={encounter.talkTargetName}
+                busy={encounter.talkBusy}
+                onTalk={encounter.talk}
+              />
+            )}
+          </div>
         </section>
 
         <aside
@@ -175,9 +290,21 @@ function App() {
               marginTop: 6,
             }}
           >
-            {tab === 'story' && <NarrativeDm provider={provider} onStoryDigestChange={setDigest} />}
-            {tab === 'details' && <DetailsPanel engine={engine} />}
-            {tab === 'world' && <WorldPanel engine={engine} digest={digest} />}
+            {tab === 'story' && (
+              <NarrativeDm
+                provider={provider}
+                dm={dm}
+                onStoryDigestChange={setDigest}
+                encounterOffer={{
+                  visible: storyIdle && !encounterActive,
+                  busy: encounter.stage.kind === 'generating',
+                  error: encounter.stage.kind === 'error' ? encounter.stage.message : null,
+                  onAccept: encounter.generate,
+                }}
+              />
+            )}
+            {tab === 'details' && <DetailsPanel engine={boardEngine} />}
+            {tab === 'world' && <WorldPanel engine={boardEngine} digest={digest} />}
           </div>
         </aside>
       </main>

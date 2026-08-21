@@ -120,14 +120,6 @@ export default function TacticalHud({ engine }: { engine: TacticalEngine }) {
           >
             Interact
           </button>
-          <button
-            type="button"
-            disabled
-            title="Talking to characters arrives in Phase 7"
-            style={button}
-          >
-            Talk
-          </button>
           {inCombat && (
             <button
               type="button"

@@ -4,6 +4,7 @@ import type { MapObject } from '../combat/environment';
 import type { EngineState, GridPosition } from '../combat/types';
 import type { SceneExitMarker } from '../scenes/schoolHallwayScene';
 import { fitZoom, screenToTile } from './camera';
+import type { BubbleManager } from '../dialogue/bubbles';
 
 export const TILE = 32;
 
@@ -31,6 +32,8 @@ const COLORS = {
 interface SceneData {
   engine: TacticalEngine;
   exits?: SceneExitMarker[];
+  /** Phase 7 speech bubbles (presentation-only, engine-unaware). */
+  bubbles?: BubbleManager;
 }
 
 interface AnimationState {
@@ -67,6 +70,9 @@ export class CombatScene extends Phaser.Scene {
   private animations = new Map<string, AnimationState>();
   private drag: { startX: number; startY: number; scrollX: number; scrollY: number } | null = null;
   private unsubscribe: (() => void) | undefined = undefined;
+  private bubbles: BubbleManager | undefined = undefined;
+  private unsubscribeBubbles: (() => void) | undefined = undefined;
+  private bubbleTexts: Phaser.GameObjects.Text[] = [];
 
   constructor() {
     super('CombatScene');
@@ -75,6 +81,7 @@ export class CombatScene extends Phaser.Scene {
   init(data: SceneData) {
     this.engine = data.engine;
     this.exits = data.exits ?? [];
+    this.bubbles = data.bubbles;
     this.presentation.clear();
     this.animations.clear();
     this.signaturesDirty();
@@ -96,16 +103,56 @@ export class CombatScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.game.canvas.removeEventListener('contextmenu', this.preventContextMenu);
       this.unsubscribe?.();
+      this.unsubscribeBubbles?.();
     });
 
     this.unsubscribe = this.engine?.subscribe(() => {
       if (this.sys.isActive()) this.drawIfChanged();
     });
 
+    if (this.bubbles !== undefined) {
+      this.unsubscribeBubbles = this.bubbles.subscribe(() => this.drawBubbles());
+    }
+
     this.setupCamera();
     this.drawIfChanged();
     // Focus the player at the arrival position when a scene loads.
     this.focusPlayer();
+  }
+
+  /** Speech bubbles (Phase 7): one floating label above each speaking unit. */
+  private drawBubbles() {
+    // ponytail: destroyed scenes linger in BubbleManager listeners until their
+    // unsubscribe runs; guard so a dead scene can't break the notify chain.
+    if (this.sys === null || !this.sys.isActive() || this.add === null) return;
+    for (const text of this.bubbleTexts) text.destroy();
+    this.bubbleTexts = [];
+    if (this.bubbles === undefined) return;
+    const state = this.engine?.state;
+    if (state === undefined) return;
+    for (const bubble of this.bubbles.active()) {
+      const unit = state.units.find((candidate) => candidate.id === bubble.unitId);
+      if (unit === undefined) continue;
+      this.bubbleTexts.push(
+        this.add
+          .text(
+            unit.position.x * TILE + TILE / 2,
+            unit.position.y * TILE - 8,
+            bubble.text,
+            {
+              color: '#ffffff',
+              fontSize: '12px',
+              fontFamily: 'system-ui, sans-serif',
+              backgroundColor: '#000000cc',
+              padding: { x: 5, y: 3 },
+              align: 'center',
+              wordWrap: { width: 190 },
+            },
+          )
+          .setOrigin(0.5, 1)
+          .setDepth(50),
+      );
+    }
   }
 
   update(_time: number, delta: number) {
