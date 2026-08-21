@@ -99,12 +99,18 @@ export class CombatScene extends Phaser.Scene {
     this.input.on('wheel', this.handleWheel, this);
 
     // Middle/right-drag panning must not open the browser context menu.
-    this.game.canvas.addEventListener('contextmenu', this.preventContextMenu);
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      this.game.canvas.removeEventListener('contextmenu', this.preventContextMenu);
+    const canvas = this.game.canvas;
+    canvas.addEventListener('contextmenu', this.preventContextMenu);
+    const cleanup = () => {
       this.unsubscribe?.();
+      this.unsubscribe = undefined;
       this.unsubscribeBubbles?.();
-    });
+      this.unsubscribeBubbles = undefined;
+      canvas.removeEventListener('contextmenu', this.preventContextMenu);
+      this.scale.off(Phaser.Scale.Events.RESIZE, this.onResize, this);
+    };
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, cleanup);
+    this.events.once(Phaser.Scenes.Events.DESTROY, cleanup);
 
     this.unsubscribe = this.engine?.subscribe(() => {
       if (this.sys.isActive()) this.drawIfChanged();
@@ -116,14 +122,15 @@ export class CombatScene extends Phaser.Scene {
 
     this.setupCamera();
     this.drawIfChanged();
+    // A replacement scene may subscribe after a bubble was already published.
+    this.drawBubbles();
     // Focus the player at the arrival position when a scene loads.
     this.focusPlayer();
   }
 
   /** Speech bubbles (Phase 7): one floating label above each speaking unit. */
   private drawBubbles() {
-    // ponytail: destroyed scenes linger in BubbleManager listeners until their
-    // unsubscribe runs; guard so a dead scene can't break the notify chain.
+    // Defend the brief teardown window before lifecycle cleanup runs.
     if (this.sys === null || !this.sys.isActive() || this.add === null) return;
     for (const text of this.bubbleTexts) text.destroy();
     this.bubbleTexts = [];

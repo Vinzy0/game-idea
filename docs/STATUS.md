@@ -2,7 +2,7 @@
 
 ## Current Milestone
 
-**V0.1 Vertical Slice (PRD §72 loop) is FUNCTIONALLY COMPLETE as of 2026-08-21 — one known presentation bug open (see Known Bugs).**
+**V0.1 Vertical Slice (PRD §72 loop) is FUNCTIONALLY COMPLETE as of 2026-08-21. Known presentation Bug #1 is fixed.**
 
 Phases 1–8 of PRD §71 are implemented and the §72 acceptance scenario was played end-to-end in a real browser on 2026-08-21. Evidence: `docs/qa/v01-acceptance/` (8 screenshots + this file's QA section). The Phase 6A persistent-world pivot remains parked; the PRD vertical slice took priority per product decision.
 
@@ -14,7 +14,7 @@ Played twice, both runs clean. Steps observed:
 2. Three chat turns → conflict beat → major-change proposal declined (approval gate works).
 3. **Play Tactical Encounter** → Demo provider structured output → schema-validated → validator accepted with 3 auto-adjustments → banner "Ambush in the West Hallway".
 4. Fight: moved, cast Fireball (bloodied Masked Bruiser), enemies acted (Volt cast Fireball back), hero took damage down to 3/14 HP.
-5. Mid-fight Talk via TalkBox → villain line generated ("You know enough to be dangerous. That's the problem.") — **but the speech bubble does not render on the board** (Known Bug #1).
+5. Mid-fight Talk via TalkBox → villain line generated ("You know enough to be dangerous. That's the problem."). The original run exposed a missing-bubble presentation bug; it is now fixed and browser evidence shows the line above the enemy.
 6. Victory → structured EncounterResult (downed: 3 enemies, survivors: player 3/14, destroyed: desk) → result auto-sent to DM chat as `[Encounter result] …` → DM narrated aftermath from mechanical facts.
 7. Story state persisted (situation + unresolved threads updated); player kept chatting and the story continued.
 
@@ -30,25 +30,20 @@ Quality gates at time of writing: 235/235 vitest, tsc clean, eslint clean, produ
 | 4.5   | Architecture Review  | SMART AI                      | COMPLETE | Gate passed after targeted fixes: full encounter construction invariants, chosen-player targeting for TILE abilities, engine-owned `canInteract`, native state subscriptions for React/Phaser, occupied-door protection, and idempotent object destruction. Cosmetic splitting was rejected; controller reassignment, advanced map reachability, LOS/cover, and broader scenario validation remain in their intended phases. 94 tests, typecheck, lint, and production build pass; the Phaser bundle-size warning is documented and non-blocking. Full rationale: `docs/PHASE4_5_ARCHITECTURE_REVIEW.md`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | 5     | AI DM Prototype      | SMART design + FAST implementation | COMPLETE | Provider-neutral `AIProvider` contract with narrative/structured/dialogue seams; defensively validated HTTP gateway adapter with no browser credentials; explicitly labeled deterministic Demo provider; narrative-first setup/chat UI with loading, abort, error/retry, approval proposals, context panel, and New Story confirmation; pure story transitions plus versioned fail-closed local persistence and bounded request context; tactical demo preserved behind a lazy chunk. Full gate: 174/174 tests, typecheck, lint, and production build pass. Browser QA completed a three-turn story, blocked a major irreversible proposal for approval, persisted the approved result across reload, switched to Combat Demo, and observed zero console warnings/errors. Known boundary: a live model requires a separately hosted trusted gateway; the repository defaults to offline Demo mode and does not include provider credentials or a production gateway server. |
 | 6     | Encounter Generation | SMART design + FAST implementation | COMPLETE | `EncounterSpec` schema + `parseEncounterSpec` validation (`src/game/encounter/spec.ts`); deterministic validator/repair with warnings (`src/game/encounter/build.ts`); `provider.generateStructured` wired in `useEncounter`; "⚔ Play Tactical Encounter" offer in the DM panel when the story is idle; validated spec builds a runnable `TacticalEngine` config; Demo provider ships the §72 hallway encounter (melee x2 + powered enemy, each with stated intent). |
-| 7     | Combat Dialogue      | SMART design + FAST implementation | COMPLETE | Engine event bus → deduped bark evaluator (`buildBarkRequests`) → `requestCombatLine` → `BubbleManager` → Phaser speech bubbles; player TalkBox mid-fight routes to the nearest living enemy via `provider.generateDialogue`; fallback line on provider failure. **Known Bug #1: bubbles do not render on the board — see Known Bugs.** |
+| 7     | Combat Dialogue      | SMART design + FAST implementation | COMPLETE | Engine event bus → deduped bark evaluator (`buildBarkRequests`) → `requestCombatLine` → `BubbleManager` → Phaser speech bubbles; player TalkBox mid-fight routes to the nearest living enemy via `provider.generateDialogue`; fallback line on provider failure. Bubble rendering lifecycle bug fixed with browser evidence in `docs/qa/v01-acceptance/05-midfight-talk-villain-bubble.png`. |
 | 8     | Return to Story      | FAST AI                       | COMPLETE | VICTORY watcher summarizes the engine's structured `EncounterResult` (`summarizeEncounter`) and sends it to the DM chat as the next player input; DM narrates aftermath from mechanical facts and updates situation/threads; persisted story lets the player continue chatting. |
 
-## Known Bugs
+## Fixes
 
-### Bug #1 (open): Combat speech bubbles never render on the board
+### Bug #1 (fixed 2026-08-21): Combat speech bubbles disappeared from the board
 
-- **Symptom:** Mid-fight Talk and triggered villain barks produce the correct line in the `BubbleManager` (verified: items contain "You know enough to be dangerous. That's the problem."), but no bubble `Text` object appears in the live `CombatScene` display list — only HP labels.
-- **Confirmed so far:**
-  - The UI TalkBox and the scene receive the **same** `BubbleManager` instance (say() from the scene's own manager updates `scene.bubbles.items`).
-  - The live scene's `drawBubbles()` **is invoked** on notify (instrumented: 2 calls per say()).
-  - Calling `scene.drawBubbles()` directly succeeds and **does** create the bubble `Text` — so the draw code itself works when run.
-  - A guard added 2026-08-21 in `CombatScene.drawBubbles` (`if (this.sys === null || !this.sys.isActive() || this.add === null) return;`) fixed a real crash: destroyed scenes lingered as `BubbleManager` listeners (up to 13 accumulated) and a destroyed scene's `this.add` was null, throwing inside `notify()` and breaking the chain. That crash is gone; the missing-render symptom remains.
-- **Suspects (unverified):** (a) the instrumented `drawBubbles` calls may be running on a **different scene instance** than the one rendering (React StrictMode double-mount / engine-swap remount leaves multiple Phaser games or scenes; `window.__game` points at the newest, but an older still-attached canvas may be what's visible); (b) the bubble `Text` is created then immediately destroyed by a signature-based redraw pass (`drawIfChanged`) that doesn't know about bubbles; (c) z-order/camera scroll places it off-viewport.
-- **Repro:** start dev server, play the §72 loop to a bloodied enemy on the player's turn, type into "Talk to …" box, press Say. Watch `scene.children.list` for a `Text` matching the line.
+- **Root cause:** During an encounter, React supplied a new empty `exits` array on unrelated state updates such as `talkBusy`. `GameCanvas` used that array identity as a Phaser lifecycle dependency, so it destroyed and recreated `Phaser.Game` immediately after the bubble was drawn. The replacement scene subscribed after the existing bubble had been published and did not perform an initial bubble draw. This explains why a manual later `drawBubbles()` call succeeded.
+- **Lifecycle fix:** `GameCanvas` collapses equivalent empty exit lists to one stable identity, preventing unrelated React updates from recreating Phaser. `CombatScene` also draws existing bubbles on creation so intentional scene replacement preserves presentation state.
+- **Listener fix:** Scene cleanup now unsubscribes engine and bubble listeners on both `SHUTDOWN` and `DESTROY`, captures the live canvas for safe listener removal, and detaches the resize listener. The inactive/destroyed-scene guard remains as teardown-race protection.
+- **Verification:** `npx tsc --noEmit`, `npx eslint src --max-warnings=0`, and `npx vitest run` passed with 235/235 tests. A real browser run produced the villain line visibly above the correct enemy; evidence: `docs/qa/v01-acceptance/05-midfight-talk-villain-bubble.png`.
 
 ## Next Actions
 
-1. Fix Known Bug #1 (bubble rendering) — last gap in the §72 acceptance test.
-2. Re-run the acceptance playthrough and confirm the villain bubble is visible in screenshot evidence.
-3. Commit the Phase 6–8 work (currently uncommitted on top of `336dc77`).
-4. Resume the parked Phase 6A persistent-world pivot only after V0.1 is signed off.
+1. Review and sign off V0.1 plus the resolved bubble evidence.
+2. Plan the gameplay-first UI/UX, visual asset, animation, and live-AI work from `docs/GAMEPLAY_UI_UX_AI_IMPROVEMENT_HANDOFF.md`.
+3. Resume the parked Phase 6A persistent-world pivot only after the next product priority is chosen.

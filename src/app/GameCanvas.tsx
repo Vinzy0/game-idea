@@ -5,6 +5,8 @@ import { CombatScene } from '../game/rendering/CombatScene';
 import type { SceneExitMarker } from '../game/scenes/schoolHallwayScene';
 import type { BubbleManager } from '../game/dialogue/bubbles';
 
+const NO_EXITS: SceneExitMarker[] = [];
+
 /**
  * Owns the Phaser game instance for the component's lifetime. The game fills
  * its container and resizes with it; it is fully destroyed on unmount (safe
@@ -13,7 +15,7 @@ import type { BubbleManager } from '../game/dialogue/bubbles';
  */
 export default function GameCanvas({
   engine,
-  exits = [],
+  exits = NO_EXITS,
   bubbles,
 }: {
   engine: TacticalEngine;
@@ -21,6 +23,9 @@ export default function GameCanvas({
   bubbles?: BubbleManager;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Encounter renders pass an empty array. Collapse equivalent empty values to
+  // one identity so unrelated React state updates do not recreate Phaser.
+  const sceneExits = exits.length === 0 ? NO_EXITS : exits;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -37,7 +42,7 @@ export default function GameCanvas({
       backgroundColor: '#1a1a2e',
       parent: container,
     });
-    game.scene.add('CombatScene', CombatScene, true, { engine, exits, bubbles });
+    game.scene.add('CombatScene', CombatScene, true, { engine, exits: sceneExits, bubbles });
 
     // Dev affordance: expose the game instance for automated QA/playthrough drives.
     if (import.meta.env.DEV) {
@@ -55,7 +60,7 @@ export default function GameCanvas({
       observer.disconnect();
       game.destroy(true);
     };
-  }, [engine, exits, bubbles]);
+  }, [engine, sceneExits, bubbles]);
 
   return <div ref={containerRef} style={{ width: '100%', height: '100%' }} />;
 }
