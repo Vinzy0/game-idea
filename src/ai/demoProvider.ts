@@ -17,6 +17,7 @@ import {
   type StructuredRequest,
   type StructuredResponse,
 } from './provider';
+import { demoDialogue, demoStructured } from './demoEncounter';
 
 const DEMO_DELAY_MS = 120;
 
@@ -102,7 +103,14 @@ function resolveThreads(threads: DemoBeat['threads'], ctx: BeatCtx): string[] {
   return typeof threads === 'function' ? threads(ctx) : [...threads];
 }
 
-/** Pure narrative engine: same request always yields the same response. */
+/** Marker the app prepends to the player input when a battle just ended. */
+export const ENCOUNTER_RESULT_PREFIX = '[Encounter result]';
+
+/**
+ * Pure narrative engine: same request always yields the same response.
+ * When the latest player input reports a finished battle (PRD §72), the DM
+ * narrates the aftermath from the mechanical facts instead of the beat list.
+ */
 export function demoNarrative(request: NarrativeRequest): NarrativeResponse {
   const ctx: BeatCtx = {
     name: request.player.name,
@@ -116,6 +124,17 @@ export function demoNarrative(request: NarrativeRequest): NarrativeResponse {
   const beat = isOpening
     ? OPENING_BEAT
     : BEATS[Math.min(Math.max(request.turnCount - 1, 0), BEATS.length - 1)];
+
+  if (request.input.startsWith(ENCOUNTER_RESULT_PREFIX)) {
+    const facts = request.input.slice(ENCOUNTER_RESULT_PREFIX.length).trim();
+    return {
+      narration: `The last mask clatters to the tile beside the lockers. ${facts} ${ctx.name} stands breathing hard in the sudden quiet — the hallway lights steadier now, as if the building itself exhales. Whatever the masks wanted, they failed to take it. Word of this will spread by morning.`,
+      situation: `${ctx.name} has won the hallway fight; the masked students are down and the school is quiet again.`,
+      unresolvedThreads: ['Find out who sent the masked students'],
+      proposal: null,
+    };
+  }
+
   return {
     narration: resolveText(beat.scene, ctx),
     situation: resolveText(beat.situation, ctx),
@@ -160,14 +179,18 @@ export class DemoProvider implements AIProvider {
     });
   }
 
-  // Seam stubs: structured/dialogue are Phase 6/7 concerns. Honest about it.
+  // Structured/dialogue: Phase 6/7 seams backed by deterministic demo content.
   generateStructured(request: StructuredRequest, signal?: AbortSignal): Promise<StructuredResponse> {
-    throwIfAborted(signal);
-    return Promise.resolve({ data: { demo: true, echo: request.prompt } });
+    return delay(DEMO_DELAY_MS, signal).then(() => {
+      throwIfAborted(signal);
+      return demoStructured(request);
+    });
   }
 
   generateDialogue(request: DialogueRequest, signal?: AbortSignal): Promise<DialogueResponse> {
-    throwIfAborted(signal);
-    return Promise.resolve({ lines: [`"${request.prompt}"`] });
+    return delay(DEMO_DELAY_MS, signal).then(() => {
+      throwIfAborted(signal);
+      return demoDialogue(request);
+    });
   }
 }

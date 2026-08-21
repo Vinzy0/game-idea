@@ -1,11 +1,21 @@
 /**
  * Phase 5 AI DM narrative UI: player setup → DM chat transcript with
  * loading/error/retry, proposal approval, story summary, and reset.
- * This is the default app mode; the combat demo lives behind a lazy chunk.
+ * Phase 6A: lives in the Story tab of the always-on board shell and reports a
+ * story digest for the World tab.
  */
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import type { AIProvider, NarrativeAuthority, NarrativeMessageRole } from '../ai/provider';
-import { useNarrativeDm } from './useNarrativeDm';
+import { useNarrativeDm, type NarrativeDmApi } from './useNarrativeDm';
+import type { StoryDigest } from './WorldPanel';
+
+/** Play-this-scene offer wired by the app shell (Phase 6). */
+export interface EncounterOffer {
+  visible: boolean;
+  busy: boolean;
+  error: string | null;
+  onAccept: () => void;
+}
 
 const panel: React.CSSProperties = {
   fontFamily: 'system-ui, sans-serif',
@@ -44,8 +54,20 @@ const roleLabel: Record<NarrativeMessageRole, string> = {
   system: 'System',
 };
 
-export default function NarrativeDm({ provider }: { provider: AIProvider }) {
+export default function NarrativeDm({
+  provider,
+  dm: dmProp,
+  onStoryDigestChange,
+  encounterOffer,
+}: {
+  provider: AIProvider;
+  /** Shared lifecycle from the app shell; a local one is created when absent. */
+  dm?: NarrativeDmApi;
+  onStoryDigestChange?: (digest: StoryDigest | null) => void;
+  encounterOffer?: EncounterOffer;
+}) {
   const dm = useNarrativeDm(provider);
+  const dmApi = dmProp ?? dm;
   const [name, setName] = useState('');
   const [archetype, setArchetype] = useState('');
   const [notes, setNotes] = useState('');
@@ -54,12 +76,25 @@ export default function NarrativeDm({ provider }: { provider: AIProvider }) {
   const [authority, setAuthority] = useState<NarrativeAuthority>('DEFAULT');
   const [draft, setDraft] = useState('');
 
-  const canStart = name.trim() !== '' && archetype.trim() !== '' && !dm.starting;
+  // Report the story digest to the shell (World tab + board dimming).
+  useEffect(() => {
+    onStoryDigestChange?.(
+      dmApi.story === null
+        ? null
+        : {
+            situation: dmApi.story.situation,
+            unresolvedThreads: dmApi.story.unresolvedThreads,
+          },
+    );
+    // Digest only: not every transient phase.
+  }, [dmApi.story, onStoryDigestChange]);
+
+  const canStart = name.trim() !== '' && archetype.trim() !== '' && !dmApi.starting;
 
   const handleStart = (event: FormEvent) => {
     event.preventDefault();
     if (!canStart) return;
-    void dm.startStory(
+    void dmApi.startStory(
       { name: name.trim(), archetype: archetype.trim(), notes: notes.trim() },
       { setting: setting.trim() || 'the school', tone: tone.trim() || 'neutral', authority },
     );
@@ -69,17 +104,17 @@ export default function NarrativeDm({ provider }: { provider: AIProvider }) {
     event.preventDefault();
     const input = draft;
     if (input.trim() === '') return;
-    dm.send(input);
+    dmApi.send(input);
     setDraft('');
   };
 
   const handleNewStory = () => {
     if (window.confirm('Delete the current local story and start over?')) {
-      dm.resetStory();
+      dmApi.resetStory();
     }
   };
 
-  const story = dm.story;
+  const story = dmApi.story;
   const inputDisabled = story === null || story.phase !== 'IDLE';
 
   return (
@@ -111,7 +146,7 @@ export default function NarrativeDm({ provider }: { provider: AIProvider }) {
           }}
           title="Active narrative provider"
         >
-          Provider: {dm.providerLabel}
+          Provider: {dmApi.providerLabel}
         </span>
       </div>
 
@@ -201,7 +236,7 @@ export default function NarrativeDm({ provider }: { provider: AIProvider }) {
             disabled={!canStart}
             style={{ padding: '8px 14px', alignSelf: 'flex-start', cursor: canStart ? 'pointer' : 'not-allowed' }}
           >
-            {dm.starting ? 'Starting…' : 'Start Story'}
+            {dmApi.starting ? 'Starting…' : 'Start Story'}
           </button>
         </form>
       ) : (
@@ -278,7 +313,7 @@ export default function NarrativeDm({ provider }: { provider: AIProvider }) {
                   <strong>The DM failed to respond.</strong> {story.lastError}
                   <button
                     type="button"
-                    onClick={dm.retry}
+                    onClick={dmApi.retry}
                     style={{ marginLeft: 10, padding: '3px 10px', cursor: 'pointer' }}
                   >
                     Retry
@@ -307,14 +342,14 @@ export default function NarrativeDm({ provider }: { provider: AIProvider }) {
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button
                       type="button"
-                      onClick={dm.approveProposal}
+                      onClick={dmApi.approveProposal}
                       style={{ padding: '4px 12px', cursor: 'pointer' }}
                     >
                       Approve
                     </button>
                     <button
                       type="button"
-                      onClick={dm.declineProposal}
+                      onClick={dmApi.declineProposal}
                       style={{ padding: '4px 12px', cursor: 'pointer' }}
                     >
                       Decline
@@ -377,6 +412,38 @@ export default function NarrativeDm({ provider }: { provider: AIProvider }) {
               </button>
             </aside>
           </div>
+
+          {encounterOffer?.visible === true && (
+            <div
+              aria-label="Encounter offer"
+              style={{
+                display: 'flex',
+                gap: 10,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                background: '#2b2417',
+                border: '1px solid #d29922',
+                borderRadius: 8,
+                padding: '8px 12px',
+                fontSize: 13,
+              }}
+            >
+              <span>The DM senses this moment could turn physical.</span>
+              <button
+                type="button"
+                onClick={encounterOffer.onAccept}
+                disabled={encounterOffer.busy}
+                style={{ padding: '5px 14px', cursor: encounterOffer.busy ? 'wait' : 'pointer', border: '1px solid #d29922' }}
+              >
+                {encounterOffer.busy ? 'Generating encounter…' : '⚔ Play Tactical Encounter'}
+              </button>
+              {encounterOffer.error !== null && (
+                <span role="alert" style={{ color: '#ff7b72', fontSize: 12 }}>
+                  {encounterOffer.error}
+                </span>
+              )}
+            </div>
+          )}
 
           <form
             onSubmit={handleSend}

@@ -9,7 +9,17 @@ import type {
 } from '../abilities/types';
 import { createObject, movementCostAt, objectBlocksMovement } from './environment';
 import type { MapObject } from './environment';
-import type { EngineState, GameConfig, GridPosition, Team, Unit } from './types';
+import { cloneSceneEvent, selectImportantEvents } from './events';
+import type { EncounterResult, SceneEvent, SceneEventInput } from './events';
+import type {
+  CombatStartSpec,
+  EngineState,
+  GameConfig,
+  GridPosition,
+  ScenePhase,
+  Team,
+  Unit,
+} from './types';
 import { validateEncounterSetup } from './validation';
 
 const NEIGHBORS: ReadonlyArray<readonly [number, number]> = [
@@ -30,10 +40,33 @@ function manhattanDistance(a: GridPosition, b: GridPosition): number {
   return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 }
 
+/**
+ * Target-team semantics (Phase 6A): `ALLY` means the caster's own team,
+ * `ENEMY` means the opposing combat team, `ANY` means either combat team.
+ * Neutral actors are excluded from all three filters in the first version.
+ */
 function matchesTeamFilter(caster: Unit, target: Unit, filter: TargetTeam): boolean {
+  if (target.team === 'NEUTRAL') return false;
   if (filter === 'ANY') return true;
   if (filter === 'ALLY') return caster.team === target.team;
   return caster.team !== target.team;
+}
+
+interface Checkpoint {
+  units: Unit[];
+  objects: MapObject[];
+  terrain: GridPosition[];
+  phase: ScenePhase;
+  selectedUnitId: string | null;
+  selectedAbilityId: string | null;
+  winner: Team | null;
+  turnResources: Record<string, TurnResources>;
+  log: string[];
+  events: SceneEvent[];
+  combatParticipants: string[];
+  combatObjective: 'DEFEAT_ALL_HOSTILES' | null;
+  encounterResult: EncounterResult | null;
+  nextSeq: number;
 }
 
 export class TacticalEngine {
@@ -43,10 +76,17 @@ export class TacticalEngine {
     objects: MapObject[];
     terrain: GridPosition[];
     units: Unit[];
+    phase: ScenePhase;
   };
+  private readonly sceneId: string;
+  private readonly createdAt = Date.now();
   private readonly abilitiesById = new Map<string, Ability>();
   private readonly listeners = new Set<() => void>();
   private current: EngineState;
+  private nextSeq = 0;
+  private resultCounter = 0;
+  private combatStartedAt: number | null = null;
+  private checkpoint: Checkpoint | null = null;
 
   constructor(config: GameConfig) {
     for (const ability of [...CORE_ABILITIES, ...(config.abilities ?? [])]) {
@@ -80,12 +120,16 @@ export class TacticalEngine {
       throw new Error(`Invalid encounter: ${encounterErrors.join('; ')}`);
     }
 
+    this.sceneId = config.sceneId ?? 'scene';
+    // Legacy Phase 0-5 behavior starts in PLAYER_TURN; persistent scenes pass EXPLORATION.
+    const phase: ScenePhase = config.initialPhase === 'EXPLORATION' ? 'EXPLORATION' : 'PLAYER_TURN';
     this.initial = {
       width,
       height,
       objects,
       terrain,
       units,
+      phase,
     };
     this.current = this.buildInitialState();
   }
@@ -111,6 +155,12 @@ export class TacticalEngine {
       })),
       turnResources,
       log: [...this.current.log],
+      events: this.current.events.map((event) => cloneSceneEvent(event)),
+      combatParticipants: [...this.current.combatParticipants],
+      encounterResult:
+        this.current.encounterResult === null
+          ? null
+          : this.cloneEncounterResult(this.current.encounterResult),
     };
   }
 
@@ -140,7 +190,17 @@ export class TacticalEngine {
 
   /** First step of the shortest legal path from `from` to `to`, or null. */
   firstStepToward(from: GridPosition, to: GridPosition): GridPosition | null {
-    return this.firstStepOnPath(from, to);
+    const path = this.computePath(from, to);
+    return path === null || path.length === 0 ? null : path[0];
+  }
+
+  /**
+   * Full shortest legal path between two points (same collision and path-cost
+   * rules as combat movement). Used for exploration movement and for
+   * presentation-only path animation; the engine remains the path authority.
+   */
+  pathBetween(from: GridPosition, to: GridPosition): GridPosition[] | null {
+    return this.computePath(from, to);
   }
 
   isBlocked(x: number, y: number): boolean {
@@ -178,9 +238,191 @@ export class TacticalEngine {
     if (option === undefined) return false;
 
     const unit = this.findUnit(unitId)!;
+    const from = { ...unit.position };
     unit.position = { x, y };
     this.current.turnResources[unit.id].movementRemaining -= option.distance;
     this.current.log.push(`${unit.name} moved to (${x},${y})`);
+    this.emit({
+      type: 'UNIT_MOVED',
+      unitId: unit.id,
+      from,
+      to: { x, y },
+      distance: option.distance,
+    });
+    this.notifyListeners();
+    return true;
+  }
+
+  // ---- exploration commands (Phase 6A) ----
+
+  /**
+   * Exploration click-to-move: valid only in EXPLORATION, only for a living
+   * player-controlled unit, and the destination must be reachable by the same
+   * collision/path-cost rules as combat. No movement allowance or action is
+   * consumed; the unit moves along the computed path (animation is
+   * presentation only).
+   */
+  canMoveExploration(unitId: string, x: number, y: number): boolean {
+    const unit = this.findUnit(unitId);
+    if (unit === null || unit.hp <= 0) return false;
+    if (unit.team !== 'PLAYER' || unit.controller !== 'PLAYER') return false;
+    if (this.current.phase !== 'EXPLORATION') return false;
+    if (this.isOccupiedByAliveUnit(x, y)) return false;
+    return this.computePath(unit.position, { x, y }) !== null;
+  }
+
+  /**
+   * Full path the player-controlled unit would take in exploration, or null
+   * when the destination is not reachable. Rendering uses this for
+   * presentation-only animation; the engine's position update is immediate.
+   */
+  getExplorationPath(unitId: string, x: number, y: number): GridPosition[] | null {
+    const unit = this.findUnit(unitId);
+    if (unit === null || unit.hp <= 0) return null;
+    if (unit.team !== 'PLAYER' || unit.controller !== 'PLAYER') return null;
+    if (this.current.phase !== 'EXPLORATION') return null;
+    if (this.isOccupiedByAliveUnit(x, y)) return null;
+    return this.computePath(unit.position, { x, y });
+  }
+
+  moveExplorationUnit(unitId: string, x: number, y: number): boolean {
+    const unit = this.findUnit(unitId);
+    if (unit === null || unit.hp <= 0) return false;
+    if (unit.team !== 'PLAYER' || unit.controller !== 'PLAYER') return false;
+    if (this.current.phase !== 'EXPLORATION') return false;
+    if (this.isOccupiedByAliveUnit(x, y)) return false;
+    const path = this.computePath(unit.position, { x, y });
+    if (path === null) return false;
+
+    const from = { ...unit.position };
+    unit.position = { x, y };
+    this.current.log.push(`${unit.name} moves to (${x},${y})`);
+    this.emit({
+      type: 'UNIT_MOVED',
+      unitId: unit.id,
+      from,
+      to: { x, y },
+      distance: path.length,
+    });
+    this.notifyListeners();
+    return true;
+  }
+
+  // ---- combat lifecycle (Phase 6A) ----
+
+  /** Combat may start from exploration only when both sides have living units. */
+  canStartCombat(): boolean {
+    if (this.current.phase !== 'EXPLORATION') return false;
+    return (
+      aliveUnits(this.current.units, 'PLAYER').length > 0 &&
+      aliveUnits(this.current.units, 'ENEMY').length > 0
+    );
+  }
+
+  /**
+   * Start turn-based combat on the current scene with explicit participants.
+   * Snapshots the complete pre-combat scene (Retry restores it exactly),
+   * initializes turn resources for participants only, and emits COMBAT_STARTED.
+   */
+  startCombat(spec: CombatStartSpec): boolean {
+    if (this.current.phase !== 'EXPLORATION') return false;
+    if (spec.objective !== 'DEFEAT_ALL_HOSTILES') return false;
+    if (new Set(spec.participantIds).size !== spec.participantIds.length) return false;
+
+    const participants = spec.participantIds.map((id) => this.findUnit(id));
+    if (participants.some((unit) => unit === null)) return false;
+    if (participants.some((unit) => unit!.team === 'NEUTRAL')) return false;
+    const livingPlayers = participants.filter(
+      (unit) => unit!.team === 'PLAYER' && unit!.hp > 0,
+    );
+    const livingEnemies = participants.filter(
+      (unit) => unit!.team === 'ENEMY' && unit!.hp > 0,
+    );
+    if (livingPlayers.length === 0 || livingEnemies.length === 0) return false;
+
+    this.checkpoint = this.snapshotCheckpoint();
+    this.combatStartedAt = Date.now();
+    this.current.combatParticipants = [...spec.participantIds];
+    this.current.combatObjective = spec.objective;
+    for (const unit of this.current.units) {
+      if (this.current.combatParticipants.includes(unit.id)) {
+        this.current.turnResources[unit.id] = this.freshResources(unit);
+      } else {
+        // Only explicit participants hold combat resources.
+        delete this.current.turnResources[unit.id];
+      }
+    }
+    this.current.selectedUnitId = null;
+    this.current.selectedAbilityId = null;
+    this.current.phase = 'PLAYER_TURN';
+    this.current.log.push('--- COMBAT START ---');
+    this.emit({
+      type: 'COMBAT_STARTED',
+      participantIds: [...spec.participantIds],
+      objective: spec.objective,
+    });
+    this.emit({ type: 'TURN_STARTED', team: 'PLAYER' });
+    this.notifyListeners();
+    return true;
+  }
+
+  /**
+   * Victory acknowledgment: returns the same engine and scene to
+   * EXPLORATION while preserving all resulting HP, statuses, positions,
+   * destroyed objects, door state, and the encounter result for display.
+   */
+  acknowledgeVictory(): boolean {
+    if (this.current.phase !== 'VICTORY') return false;
+    this.current.phase = 'EXPLORATION';
+    this.current.winner = null;
+    this.current.selectedUnitId = null;
+    this.current.selectedAbilityId = null;
+    this.current.combatParticipants = [];
+    this.current.combatObjective = null;
+    this.current.log.push('The fight is over. The scene returns to exploration.');
+    this.notifyListeners();
+    return true;
+  }
+
+  /**
+   * Defeat Retry: restores the exact pre-combat checkpoint (units, objects,
+   * terrain, phase, selection, resources, log, and structured events). No
+   * defeat state becomes canon in this vertical slice.
+   */
+  restoreCombatCheckpoint(): boolean {
+    if (this.current.phase !== 'DEFEAT' || this.checkpoint === null) return false;
+    const cp = this.checkpoint;
+    this.current = {
+      width: this.current.width,
+      height: this.current.height,
+      objects: cp.objects.map((object) => ({
+        ...object,
+        position: { ...object.position },
+      })),
+      terrain: cp.terrain.map((position) => ({ ...position })),
+      units: cp.units.map((unit) => ({
+        ...unit,
+        position: { ...unit.position },
+        abilityIds: [...unit.abilityIds],
+        statuses: unit.statuses.map((status) => ({ ...status })),
+      })),
+      phase: cp.phase,
+      selectedUnitId: cp.selectedUnitId,
+      selectedAbilityId: cp.selectedAbilityId,
+      winner: cp.winner,
+      turnResources: Object.fromEntries(
+        Object.entries(cp.turnResources).map(([id, resources]) => [id, { ...resources }]),
+      ),
+      log: [...cp.log],
+      events: cp.events.map((event) => cloneSceneEvent(event)),
+      combatParticipants: [...cp.combatParticipants],
+      combatObjective: cp.combatObjective,
+      encounterResult:
+        cp.encounterResult === null ? null : this.cloneEncounterResult(cp.encounterResult),
+    };
+    this.nextSeq = cp.nextSeq;
+    this.combatStartedAt = null;
+    this.current.log.push('The scene rewinds to just before the fight. Retry the encounter.');
     this.notifyListeners();
     return true;
   }
@@ -254,6 +496,14 @@ export class TacticalEngine {
     const objectRecipients = this.resolveObjectRecipients(ability, targetPosition);
 
     this.consumeActionCost(caster.id, ability);
+    this.emit({
+      type: 'ABILITY_USED',
+      casterId: caster.id,
+      abilityId: ability.id,
+      abilityName: ability.name,
+      target,
+      actionCost: ability.actionCost,
+    });
     for (const effect of ability.effects) {
       this.applyEffect(caster, ability, effect, recipients, targetPosition);
       // Destructible objects take damage only from TILE-targeting abilities.
@@ -269,15 +519,26 @@ export class TacticalEngine {
     return true;
   }
 
+  /**
+   * Phase-aware interaction legality (Phase 6A): in EXPLORATION any living
+   * player-controlled unit may interact for free; in combat the active team's
+   * units pay one Action. Adjacency and door-occupancy rules are shared.
+   */
   canInteract(unitId: string, objectId: string): boolean {
     const unit = this.findUnit(unitId);
     const object = this.current.objects.find((candidate) => candidate.id === objectId);
     if (unit === null || object === undefined) return false;
-    if (unit.hp <= 0 || this.activeTeam() !== unit.team) return false;
+    if (unit.hp <= 0) return false;
     if (!object.interactable) return false;
     if (manhattanDistance(unit.position, object.position) !== 1) return false;
-    const resources = this.current.turnResources[unit.id];
-    if (resources === undefined || resources.actionRemaining <= 0) return false;
+
+    if (this.current.phase === 'EXPLORATION') {
+      if (unit.team !== 'PLAYER' || unit.controller !== 'PLAYER') return false;
+    } else {
+      if (this.activeTeam() !== unit.team) return false;
+      const resources = this.current.turnResources[unit.id];
+      if (resources === undefined || resources.actionRemaining <= 0) return false;
+    }
     if (
       object.kind === 'DOOR' &&
       object.open &&
@@ -290,21 +551,29 @@ export class TacticalEngine {
 
   /**
    * Interact with an adjacent interactable object (currently doors). Costs one
-   * Action; other interactable kinds consume the cost without extra effect.
+   * Action in combat; exploration interaction is free.
    */
   interact(unitId: string, objectId: string): boolean {
     if (!this.canInteract(unitId, objectId)) return false;
     const unit = this.findUnit(unitId)!;
     const object = this.current.objects.find((candidate) => candidate.id === objectId)!;
-    const resources = this.current.turnResources[unit.id];
 
-    resources.actionRemaining -= 1;
+    if (this.current.phase !== 'EXPLORATION') {
+      this.current.turnResources[unit.id].actionRemaining -= 1;
+    }
     if (object.kind === 'DOOR') {
       object.open = !object.open;
       this.current.log.push(
         object.open ? `${unit.name} opens the door` : `${unit.name} closes the door`,
       );
     }
+    this.emit({
+      type: 'OBJECT_INTERACTED',
+      unitId: unit.id,
+      objectId: object.id,
+      objectKind: object.kind,
+      open: object.open,
+    });
     this.notifyListeners();
     return true;
   }
@@ -331,21 +600,29 @@ export class TacticalEngine {
     this.tickStatuses('PLAYER');
     this.current.selectedUnitId = null;
     this.current.selectedAbilityId = null;
+    this.emit({ type: 'TURN_ENDED', team: 'PLAYER' });
     this.current.phase = 'ENEMY_TURN';
     this.startTurn('ENEMY');
     this.current.log.push('--- ENEMY TURN ---');
+    this.emit({ type: 'TURN_STARTED', team: 'ENEMY' });
     this.runEnemyAI();
 
     if (this.current.phase === 'ENEMY_TURN') {
       this.tickStatuses('ENEMY');
+      this.emit({ type: 'TURN_ENDED', team: 'ENEMY' });
       this.current.phase = 'PLAYER_TURN';
       this.startTurn('PLAYER');
       this.current.log.push('--- PLAYER TURN ---');
+      this.emit({ type: 'TURN_STARTED', team: 'PLAYER' });
     }
     this.notifyListeners();
   }
 
   reset(): void {
+    this.nextSeq = 0;
+    this.resultCounter = 0;
+    this.combatStartedAt = null;
+    this.checkpoint = null;
     this.current = this.buildInitialState();
     this.notifyListeners();
   }
@@ -418,9 +695,11 @@ export class TacticalEngine {
         const unit = this.findUnit(target.unitId);
         return unit !== null && unit.hp > 0 ? [unit] : [];
       }
+      // Tile-targeted single units: neutrals are never combat recipients.
       const unit = this.current.units.find(
         (candidate) =>
           candidate.hp > 0 &&
+          candidate.team !== 'NEUTRAL' &&
           candidate.position.x === target.x &&
           candidate.position.y === target.y,
       );
@@ -460,7 +739,15 @@ export class TacticalEngine {
     );
     if (object.hp <= 0) {
       this.current.log.push(`${caster.name} destroys the ${object.kind.toLowerCase()}`);
+      const position = { ...object.position };
       this.current.objects = this.current.objects.filter((candidate) => candidate.id !== object.id);
+      this.emit({
+        type: 'OBJECT_DESTROYED',
+        objectId: object.id,
+        objectKind: object.kind,
+        position,
+        sourceUnitId: caster.id,
+      });
     }
   }
 
@@ -487,21 +774,42 @@ export class TacticalEngine {
 
   private applyDamage(caster: Unit, ability: Ability, target: Unit, amount: number): void {
     if (target.hp <= 0) return;
+    const hpBefore = target.hp;
     const damage = Math.max(0, Math.floor(amount));
     target.hp = Math.max(0, target.hp - damage);
     this.current.log.push(
       `${caster.name} ${ability.presentation.verb} ${target.name} for ${damage} damage`,
     );
-    if (target.hp === 0) this.current.log.push(`${target.name} is downed`);
+    this.emit({
+      type: 'CHARACTER_DAMAGED',
+      targetId: target.id,
+      sourceUnitId: caster.id,
+      amount: damage,
+      hpBefore,
+      hpAfter: target.hp,
+    });
+    if (target.hp === 0) {
+      this.current.log.push(`${target.name} is downed`);
+      this.emit({ type: 'CHARACTER_DOWNED', characterId: target.id, hpBefore });
+    }
   }
 
   private applyHeal(caster: Unit, ability: Ability, target: Unit, amount: number): void {
     if (target.hp <= 0) return;
+    const hpBefore = target.hp;
     const healed = Math.min(Math.max(0, Math.floor(amount)), target.maxHp - target.hp);
     target.hp += healed;
     this.current.log.push(
       `${caster.name} ${ability.presentation.verb} ${target.name} for ${healed} HP`,
     );
+    this.emit({
+      type: 'CHARACTER_HEALED',
+      targetId: target.id,
+      sourceUnitId: caster.id,
+      amount: healed,
+      hpBefore,
+      hpAfter: target.hp,
+    });
   }
 
   private applyPush(
@@ -554,6 +862,14 @@ export class TacticalEngine {
     this.current.log.push(
       `${caster.name} ${ability.presentation.verb} ${target.name} with ${definition.name}`,
     );
+    this.emit({
+      type: 'STATUS_APPLIED',
+      targetId: target.id,
+      sourceUnitId: caster.id,
+      statusId: definition.id,
+      statusName: definition.name,
+      durationTurns: duration,
+    });
   }
 
   // ---- turn, movement, and board internals ----
@@ -566,7 +882,10 @@ export class TacticalEngine {
       statuses: unit.statuses.map((status) => ({ ...status })),
     }));
     const turnResources: Record<string, TurnResources> = {};
-    for (const unit of units) turnResources[unit.id] = this.freshResources(unit);
+    // Neutral actors are not combat participants and hold no turn resources.
+    for (const unit of units) {
+      if (unit.team !== 'NEUTRAL') turnResources[unit.id] = this.freshResources(unit);
+    }
 
     return {
       width: this.initial.width,
@@ -577,12 +896,16 @@ export class TacticalEngine {
       })),
       terrain: this.initial.terrain.map((position) => ({ ...position })),
       units,
-      phase: 'PLAYER_TURN',
+      phase: this.initial.phase,
       selectedUnitId: null,
       selectedAbilityId: null,
       winner: null,
       turnResources,
       log: [],
+      events: [],
+      combatParticipants: [],
+      combatObjective: null,
+      encounterResult: null,
     };
   }
 
@@ -608,8 +931,20 @@ export class TacticalEngine {
           object.position.y === unit.position.y,
       );
       if (!hazard) continue;
+      const hpBefore = unit.hp;
       unit.hp = Math.max(0, unit.hp - 1);
       this.current.log.push(`${unit.name} takes 1 damage from the hazard`);
+      this.emit({
+        type: 'CHARACTER_DAMAGED',
+        targetId: unit.id,
+        sourceUnitId: null,
+        amount: 1,
+        hpBefore,
+        hpAfter: unit.hp,
+      });
+      if (unit.hp === 0) {
+        this.emit({ type: 'CHARACTER_DOWNED', characterId: unit.id, hpBefore });
+      }
       damaged = true;
     }
     return damaged;
@@ -675,6 +1010,51 @@ export class TacticalEngine {
     return queue.splice(bestIndex, 1)[0];
   }
 
+  /**
+   * Cost-aware Dijkstra with parent reconstruction. The destination itself may
+   * be occupied (chase semantics); intermediate tiles must be free. Doors are
+   * treated by their live state: closed doors block, open doors pass.
+   */
+  private computePath(from: GridPosition, to: GridPosition): GridPosition[] | null {
+    const startKey = `${from.x},${from.y}`;
+    const goalKey = `${to.x},${to.y}`;
+    if (startKey === goalKey) return [];
+
+    const best = new Map<string, number>([[startKey, 0]]);
+    const parent = new Map<string, string>();
+    const queue: Array<{ key: string; x: number; y: number; cost: number }> = [
+      { key: startKey, x: from.x, y: from.y, cost: 0 },
+    ];
+
+    while (queue.length > 0) {
+      const current = this.popCheapest(queue);
+      if (best.get(current.key) !== current.cost) continue; // stale entry
+      if (current.key === goalKey) {
+        const path: GridPosition[] = [];
+        let key = goalKey;
+        while (key !== startKey) {
+          const [x, y] = key.split(',').map(Number);
+          path.push({ x, y });
+          key = parent.get(key)!;
+        }
+        return path.reverse();
+      }
+      for (const [dx, dy] of NEIGHBORS) {
+        const next = { x: current.x + dx, y: current.y + dy };
+        const key = `${next.x},${next.y}`;
+        if (!this.isInBounds(next.x, next.y) || this.isBlocked(next.x, next.y)) continue;
+        if (key !== goalKey && this.isOccupiedByAliveUnit(next.x, next.y)) continue;
+        const cost = current.cost + movementCostAt(next.x, next.y, this.current.terrain);
+        const known = best.get(key);
+        if (known !== undefined && known <= cost) continue;
+        best.set(key, cost);
+        parent.set(key, current.key);
+        queue.push({ key, x: next.x, y: next.y, cost });
+      }
+    }
+    return null;
+  }
+
   private findUnit(unitId: string): Unit | null {
     return this.current.units.find((unit) => unit.id === unitId) ?? null;
   }
@@ -706,25 +1086,142 @@ export class TacticalEngine {
     );
   }
 
-  /** The team whose turn it is to act; null once the game is over. */
+  /** The team whose turn it is to act; null once the game is over or exploring. */
   private activeTeam(): Team | null {
     if (this.current.phase === 'PLAYER_TURN') return 'PLAYER';
     if (this.current.phase === 'ENEMY_TURN') return 'ENEMY';
     return null;
   }
 
+  /**
+   * Victory/defeat checks only explicit combat participants (Phase 6A). The
+   * legacy path (engine started in PLAYER_TURN without startCombat) falls back
+   * to the full PLAYER/ENEMY rosters, preserving Phase 0-5 behavior.
+   */
   private checkGameOver(): void {
-    const playerAlive = aliveUnits(this.current.units, 'PLAYER').length > 0;
-    const enemyAlive = aliveUnits(this.current.units, 'ENEMY').length > 0;
-    if (!playerAlive) {
+    if (this.current.phase === 'VICTORY' || this.current.phase === 'DEFEAT') return;
+    const participants =
+      this.current.combatParticipants.length > 0
+        ? this.current.combatParticipants
+        : this.current.units
+            .filter((unit) => unit.team === 'PLAYER' || unit.team === 'ENEMY')
+            .map((unit) => unit.id);
+    const aliveOnTeam = (team: Team): boolean =>
+      participants.some((id) => {
+        const unit = this.findUnit(id);
+        return unit !== null && unit.team === team && unit.hp > 0;
+      });
+
+    if (!aliveOnTeam('PLAYER')) {
       this.current.phase = 'DEFEAT';
       this.current.winner = 'ENEMY';
       this.current.log.push('Defeat! All player units are downed');
-    } else if (!enemyAlive) {
+      this.finishEncounter('DEFEAT');
+    } else if (!aliveOnTeam('ENEMY')) {
       this.current.phase = 'VICTORY';
       this.current.winner = 'PLAYER';
       this.current.log.push('Victory! All enemy units are downed');
+      this.finishEncounter('VICTORY');
     }
+  }
+
+  private finishEncounter(outcome: 'VICTORY' | 'DEFEAT'): void {
+    this.emit({ type: 'COMBAT_ENDED', outcome });
+    const state = this.current;
+    const participants =
+      state.combatParticipants.length > 0
+        ? state.combatParticipants
+        : state.units
+            .filter((unit) => unit.team === 'PLAYER' || unit.team === 'ENEMY')
+            .map((unit) => unit.id);
+    const survivors = state.units
+      .filter((unit) => participants.includes(unit.id) && unit.hp > 0)
+      .map((unit) => ({ characterId: unit.id, hp: unit.hp, maxHp: unit.maxHp }));
+    const downedCharacterIds = state.units
+      .filter((unit) => participants.includes(unit.id) && unit.hp <= 0)
+      .map((unit) => unit.id);
+    const destroyedObjectIds: string[] = [];
+    for (const event of state.events) {
+      if (event.type === 'OBJECT_DESTROYED') destroyedObjectIds.push(event.objectId);
+    }
+    const finalPositions: Record<string, GridPosition> = {};
+    for (const unit of state.units) {
+      if (participants.includes(unit.id)) finalPositions[unit.id] = { ...unit.position };
+    }
+
+    this.current.encounterResult = {
+      id: this.newResultId(),
+      sceneId: this.sceneId,
+      outcome,
+      participantIds: [...participants],
+      survivors,
+      downedCharacterIds,
+      destroyedObjectIds,
+      finalPositions,
+      objective: state.combatObjective ?? 'DEFEAT_ALL_HOSTILES',
+      objectiveCompleted: outcome === 'VICTORY',
+      importantEvents: selectImportantEvents(state.events),
+      startedAt: this.combatStartedAt ?? this.createdAt,
+      endedAt: Date.now(),
+    };
+  }
+
+  private newResultId(): string {
+    this.resultCounter += 1;
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return `enc-${crypto.randomUUID()}`;
+    }
+    return `enc-${this.createdAt}-${this.resultCounter}`;
+  }
+
+  private cloneEncounterResult(result: EncounterResult): EncounterResult {
+    return {
+      ...result,
+      participantIds: [...result.participantIds],
+      survivors: result.survivors.map((survivor) => ({ ...survivor })),
+      downedCharacterIds: [...result.downedCharacterIds],
+      destroyedObjectIds: [...result.destroyedObjectIds],
+      finalPositions: Object.fromEntries(
+        Object.entries(result.finalPositions).map(([id, position]) => [id, { ...position }]),
+      ),
+      importantEvents: result.importantEvents.map((event) => cloneSceneEvent(event)),
+    };
+  }
+
+  private snapshotCheckpoint(): Checkpoint {
+    const state = this.current;
+    return {
+      units: state.units.map((unit) => ({
+        ...unit,
+        position: { ...unit.position },
+        abilityIds: [...unit.abilityIds],
+        statuses: unit.statuses.map((status) => ({ ...status })),
+      })),
+      objects: state.objects.map((object) => ({
+        ...object,
+        position: { ...object.position },
+      })),
+      terrain: state.terrain.map((position) => ({ ...position })),
+      phase: state.phase,
+      selectedUnitId: state.selectedUnitId,
+      selectedAbilityId: state.selectedAbilityId,
+      winner: state.winner,
+      turnResources: Object.fromEntries(
+        Object.entries(state.turnResources).map(([id, resources]) => [id, { ...resources }]),
+      ),
+      log: [...state.log],
+      events: state.events.map((event) => cloneSceneEvent(event)),
+      combatParticipants: [...state.combatParticipants],
+      combatObjective: state.combatObjective,
+      encounterResult:
+        state.encounterResult === null ? null : this.cloneEncounterResult(state.encounterResult),
+      nextSeq: this.nextSeq,
+    };
+  }
+
+  private emit(event: SceneEventInput): void {
+    this.current.events.push({ ...event, seq: this.nextSeq } as SceneEvent);
+    this.nextSeq += 1;
   }
 
   private notifyListeners(): void {
@@ -734,11 +1231,20 @@ export class TacticalEngine {
   /**
    * Brain-driven enemy turns: repeatedly ask the shared enemy brain for the next
    * action and execute it until the brain is done, the phase changes (victory,
-   * defeat), or the per-enemy safety cap is hit.
+   * defeat), or the per-enemy safety cap is hit. Only explicit ENEMY
+   * participants act (legacy: every living ENEMY when combat started without
+   * startCombat).
    */
   private runEnemyAI(): void {
-    const enemies = aliveUnits(this.current.units, 'ENEMY');
-    for (const enemy of enemies) {
+    const enemyIds =
+      this.current.combatParticipants.length > 0
+        ? this.current.combatParticipants.filter(
+            (id) => this.findUnit(id)?.team === 'ENEMY',
+          )
+        : this.current.units.filter((unit) => unit.team === 'ENEMY').map((unit) => unit.id);
+    for (const enemyId of enemyIds) {
+      const enemy = this.findUnit(enemyId);
+      if (enemy === null || enemy.hp <= 0) continue;
       if (this.current.phase !== 'ENEMY_TURN') break;
       let actions = 0;
       while (actions < MAX_ENEMY_ACTIONS && this.current.phase === 'ENEMY_TURN') {
@@ -752,43 +1258,5 @@ export class TacticalEngine {
         actions += 1;
       }
     }
-  }
-
-  private firstStepOnPath(from: GridPosition, to: GridPosition): GridPosition | null {
-    const startKey = `${from.x},${from.y}`;
-    const goalKey = `${to.x},${to.y}`;
-    if (startKey === goalKey) return null;
-
-    // Cost-aware Dijkstra with parent reconstruction: the returned step is the
-    // first tile of the cheapest path (difficult terrain costs 2).
-    const best = new Map<string, number>([[startKey, 0]]);
-    const parent = new Map<string, string>();
-    const queue: Array<{ key: string; x: number; y: number; cost: number }> = [
-      { key: startKey, x: from.x, y: from.y, cost: 0 },
-    ];
-
-    while (queue.length > 0) {
-      const current = this.popCheapest(queue);
-      if (best.get(current.key) !== current.cost) continue; // stale entry
-      if (current.key === goalKey) {
-        let childKey = goalKey;
-        while (parent.get(childKey) !== startKey) childKey = parent.get(childKey)!;
-        const [x, y] = childKey.split(',').map(Number);
-        return { x, y };
-      }
-      for (const [dx, dy] of NEIGHBORS) {
-        const next = { x: current.x + dx, y: current.y + dy };
-        const key = `${next.x},${next.y}`;
-        if (!this.isInBounds(next.x, next.y) || this.isBlocked(next.x, next.y)) continue;
-        if (key !== goalKey && this.isOccupiedByAliveUnit(next.x, next.y)) continue;
-        const cost = current.cost + movementCostAt(next.x, next.y, this.current.terrain);
-        const known = best.get(key);
-        if (known !== undefined && known <= cost) continue;
-        best.set(key, cost);
-        parent.set(key, current.key);
-        queue.push({ key, x: next.x, y: next.y, cost });
-      }
-    }
-    return null;
   }
 }

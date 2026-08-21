@@ -1,0 +1,65 @@
+{
+  "version": "goal_ledger/v1",
+  "goal": "Build V0.1 of the AI-DM Tactical RPG per PRD (Documents/Game Idea/Product Requirements Document.md, authoritative). Done = PRD §72 acceptance scenario passes end to end, verified by actually playing it.",
+  "acceptanceCriteria": [
+    "§72: player creates character (Alex, fire) -> AI DM chat -> AI creates conflict -> Play Tactical Encounter -> AI-generated school hallway encounter (lockers, desks, spawns, 3 enemies with goals) passes validator -> fight: move, attack, Fireball, take damage, talk to enemy, villain responds dynamically, enemies act -> player wins -> structured EncounterResult -> AI DM continues story -> story log + where-we-left-off updated -> player may keep chatting",
+    "Rules honored: engine decides mechanics, AI decides creativity (§3); core rules in plain TS modules, never in Phaser scenes (§54); structured AI outputs validated against schemas before touching state (§50); simple over complete (§78)"
+  ],
+  "checkpoints": [
+    {
+      "id": "cp0",
+      "phase": "Baseline",
+      "gate": "Repo state verified; ledger created",
+      "status": "complete",
+      "evidence": ["HEAD 336dc77 (phases 1-5 + 6A committed)", "218/218 vitest pass (observed 2026-08-21)", "Provider seams generateStructured/generateDialogue exist unused; engine has exploration->startCombat->EncounterResult; missing: Phase 6/7/8 wiring"]
+    },
+    {
+      "id": "cp1",
+      "phase": "PRD §71 Phase 6 - Encounter Generation",
+      "gate": "Text story can become a playable encounter: ScenarioSpec schema + deterministic validator + provider structured output + UI offer (Play Tactical Encounter / Play This Out) -> validated spec -> TacticalEngine fight",
+      "status": "complete",
+      "evidence": ["EncounterSpec schema + parseEncounterSpec validation (src/game/encounter/spec.ts); deterministic validator with repair/warnings (src/game/encounter/build.ts); provider.generateStructured seam wired in src/app/useEncounter.ts; 'Play Tactical Encounter' button in NarrativeDm when story idle; demoEncounterSpec = §72 hallway (lockers/desks/door/barrel/hazard, melee x2 + powered enemy with intents); 235/235 vitest pass incl. build.test.ts walled-off-map rejection (observed 2026-08-21); tsc/eslint/build clean"]
+    },
+    {
+      "id": "cp2",
+      "phase": "PRD §71 Phase 7 - Combat Dialogue",
+      "gate": "Characters can meaningfully talk while fighting: Talk action + AI responses + speech bubbles + triggered villain dialogue (event-driven, not every action)",
+      "status": "complete",
+      "evidence": ["Event-driven barks deduped per unit:trigger from engine events (useEncounter bark watcher); TalkBox mid-combat input -> requestCombatLine -> nearest living enemy answers via generateDialogue -> BubbleManager speech bubbles on WorldBoard; combatDialogue.test.ts covers line selection + trigger mapping; 235/235 pass (observed 2026-08-21)"]
+    },
+    {
+      "id": "cp3",
+      "phase": "PRD §71 Phase 8 - Return to Story",
+      "gate": "Complete story -> combat -> story loop: EncounterResult summarized to AI DM, narration continues, story log + where-we-left-off updated",
+      "status": "complete",
+      "evidence": ["Engine emits structured EncounterResult on VICTORY; summarizeEncounter -> dm.send('[Encounter result] ...') as next player input (useEncounter victory watcher); demoNarrative narrates aftermath from mechanical facts, updates situation + unresolvedThreads; story persisted to localStorage (where-we-left-off equivalent per ledger note: files land with Electron); player can keep chatting after; 235/235 pass (observed 2026-08-21)"]
+    },
+    {
+      "id": "cp4",
+      "phase": "PRD §72 Acceptance Test",
+      "gate": "Full playthrough in browser, actually played, evidence recorded (screenshots/console/log); docs/STATUS.md updated; committed",
+      "status": "in_progress",
+      "evidence": [
+        "Played end-to-end twice in headless Chrome on 2026-08-21 (create Alex -> chat -> decline proposal -> Play Tactical Encounter -> validator 3 adjustments -> move/Fireball/bloodied enemy -> took damage to 3/14 -> Talk mid-fight -> villain line generated -> VICTORY -> EncounterResult -> DM aftermath narration -> situation+threads persisted -> kept chatting)",
+        "Screenshots: docs/qa/v01-acceptance/01..08 (character creation, conflict beat, encounter banner, midfight fireball, victory, aftermath narration, story continues)",
+        "Zero console errors; 235/235 vitest, tsc/eslint/build clean",
+        "OPEN GAP: speech bubble does not render on the board (Known Bug #1 in docs/STATUS.md) - dialogue works at provider/manager level, presentation missing",
+        "STATUS.md updated with phases 6-8 + Known Bugs + Next Actions"
+      ]
+    }
+  ],
+  "blockers": [
+    {
+      "id": "b1",
+      "summary": "Combat speech bubbles never render on the board (presentation only; dialogue pipeline verified working)",
+      "smallestUnblock": "Handoff prompt delivered to user for Codex; fix + re-run acceptance screenshots"
+    }
+  ],
+  "nextAction": "b1: Codex fixes bubble rendering per handoff prompt; then re-run §72 playthrough, verify bubble visible in screenshot, commit",
+  "notes": [
+    "Repo has a committed Phase 6A persistent-world pivot (32x32 board); user directive: PRD is authoritative for V0.1 - build the §72 loop reusing the existing engine; do not re-plan",
+    "V0.1 runs in browser (no Electron yet): where-we-left-off + story log are markdown content persisted in story state and rendered in UI; materializing as files lands with Electron (PRD §42 allows layout changes)",
+    "Live LLM needs a separately hosted gateway (Phase 5 decision); Demo provider carries the full §72 loop deterministically",
+    "2026-08-21 session fixed 3 pre-existing type errors + 2 lint warnings in uncommitted Phase 6-8 code before gating"
+  ]
+}
